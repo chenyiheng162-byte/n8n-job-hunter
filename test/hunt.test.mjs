@@ -539,7 +539,11 @@ test('the same vacancy from another board (another link, same title and company)
     const f = path.join(t.home, 'data', 'applications.jsonl'); const old = new Date(Date.now() - 45 * 86400000).toISOString();
     fs.writeFileSync(f, fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.stringify({ ...JSON.parse(l), ts: old })).join('\n') + '\n');
     const later = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '', REMOTIVE: 'on', REMOTIVE_API_BASE: `${t.world.base}/remotive` }, ['--direct', '--force']);
-    assert.equal(later.plan.items.length, 1, 'seen again after 45 days (JOB_MAX_AGE_DAYS 30)');
+    assert.equal(later.plan.items.length, 1, 'seen again after 45 days (window = max(JOB_MAX_AGE_DAYS, RECIPIENT_COOLDOWN_DAYS) = 30)');
+    // a short age filter does not shorten the window below the recipient cooldown
+    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.stringify({ ...JSON.parse(l), ts: new Date(Date.now() - 10 * 86400000).toISOString() })).join('\n') + '\n');
+    const soon = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '', REMOTIVE: 'on', REMOTIVE_API_BASE: `${t.world.base}/remotive`, JOB_MAX_AGE_DAYS: '3' }, ['--direct', '--force']);
+    assert.equal(soon.plan.items.length, 0, 'still the same vacancy 10 days later with JOB_MAX_AGE_DAYS=3');
   } finally { await t.done(); }
 });
 
@@ -583,7 +587,8 @@ test('a refused STARTTLS is "certainly not sent" (retried, no cooldown); a local
 
 test('a posting page that redirects is followed only to allowed addresses, hop by hop, in the stage code itself', { skip }, async () => {
   const jobs = [
-    { title: 'R1 分析', company: 'Red', snippet: '[score:9] 请在官网投递。', redirect: 'http://10.0.0.5/secret' },                                        // into the LAN: refused
+    { title: 'R1 分析', company: 'Red', snippet: '[score:9] 请在官网投递。', redirect: (base) => base.replace('127.0.0.1', '0x7f.0.0.1') + '/job/leak' },   // a local address in a spelling the check refuses but a fetch would reach: must NOT be requested
+    { title: 'leak', company: 'Red', snippet: 'x', page: '<html><a href="/apply/99">Apply now</a></html>' },
     { title: 'R2 分析', company: 'Red2', snippet: '[score:9] 请在官网投递。', redirect: '/job/R2-final' },                                               // to another page here: followed
     { title: 'R2-final', company: 'Red2', snippet: 'x', page: '<html><a href="/apply/22">Apply now</a></html>' },                                            // (score 5: skipped as a posting)
   ];
@@ -592,7 +597,7 @@ test('a posting page that redirects is followed only to allowed addresses, hop b
     const r = await run(t.home, t.world, t.smtp);
     const by = Object.fromEntries(r.acted.listed.map((i) => [i.title, i]));
     assert.equal(by['R1 分析'].applyUrl, ''); assert.match(by['R2 分析'].applyUrl, /\/apply\/22$/);
-    assert.deepEqual(t.world.log.pages.sort(), ['/job/R1%20%E5%88%86%E6%9E%90', '/job/R2%20%E5%88%86%E6%9E%90', '/job/R2-final'].sort());
+    assert.deepEqual(t.world.log.pages.sort(), ['/job/R1%20%E5%88%86%E6%9E%90', '/job/R2%20%E5%88%86%E6%9E%90', '/job/R2-final'].sort(), 'the refused hop was never requested');
   } finally { await t.done(); }
 });
 

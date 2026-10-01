@@ -43,7 +43,7 @@ const jobIdOf = (url, title = '', company = '') => { const u = canonicalUrl(url)
 // Events written by the sender (hunt.mjs) carry `to`; the console's bookkeeping events (applied / dismissed / an undo that
 // restores an earlier status) never do, and must not look like a send attempt or forget a recipient.
 const SEND_STATUS = ['sending', 'sent', 'unknown', 'failed'];
-const KEY_WINDOW_MS = Number(E('JOB_MAX_AGE_DAYS', '30')) * 86400000; // how far back "same title and company" counts as the same vacancy
+const KEY_WINDOW_MS = Math.max(Number(E('JOB_MAX_AGE_DAYS', '30')), Number(E('RECIPIENT_COOLDOWN_DAYS', '30')), 1) * 86400000; // how far back "same title and company" counts as the same vacancy (at least the recipient cooldown: a short age filter must not re-open applied-for vacancies)
 const isSendEvent = (ev) => SEND_STATUS.includes(ev.status) && ev.to !== undefined;
 function loadState() {
   const jobs = new Map(); const recipients = new Map(); const keys = new Map();

@@ -482,7 +482,7 @@ test('清除测试记录 never removes a posting whose last send was real, even 
     c.ctx.appendEvent({ id: b, status: 'sent', title: 'B', to: 'me@example.net', intendedTo: 'hr@b.com', redirected: true });
     const r = (await c.call('POST', '/api/jobs/clear-test')).json; assert.deepEqual([r.ok, r.removed], [true, 1]);
     const jobs = (await c.call('GET', '/api/jobs')).json.jobs;
-    assert.equal(jobs.find((j) => j.id === a).status, 'sent', 'the real send record stays (no second mail to hr@a.com)'); assert.ok(!jobs.some((j) => j.id === b));
+    const A = jobs.find((j) => j.id === a); assert.equal(A.status, 'sent', 'the real send record stays (no second mail to hr@a.com)'); assert.deepEqual([A.redirected, A.intendedTo, A.to], [false, '', 'hr@a.com'], 'shown as the real send it is'); assert.ok(!jobs.some((j) => j.id === b));
   } finally { await c.close(); }
 });
 

@@ -168,12 +168,14 @@ function scheduleInfo(ctx) {
 const httpOnly = (u) => (/^https?:\/\//.test(u || '') ? u : '');
 const STATUS_GROUP = { manual: 'todo', sent: 'sent', sending: 'attention', unknown: 'attention', failed: 'attention', applied: 'done', dismissed: 'done', skipped: 'skipped' };
 function jobsView(ctx) {
-  const merged = new Map(); const failedAttempts = new Map();
+  const merged = new Map(); const failedAttempts = new Map(); const lastSend = new Map();
   for (const e of ctx.events()) {
     const prev = merged.get(e.id) || {};
     merged.set(e.id, { ...prev, ...Object.fromEntries(Object.entries(e).filter(([, v]) => v !== undefined)) });
-    if (e.status === 'failed' && e.to !== undefined) failedAttempts.set(e.id, (failedAttempts.get(e.id) || 0) + 1);   // real attempts, as the workflow counts them
+    if (e.to !== undefined && ['sending', 'sent', 'unknown', 'failed'].includes(e.status)) { lastSend.set(e.id, e); if (e.status === 'failed') failedAttempts.set(e.id, (failedAttempts.get(e.id) || 0) + 1); }   // the sender's own events
   }
+  // whether a posting's mail was a test send is a property of its LAST send (a real send after an earlier test attempt is real)
+  for (const [id, j] of merged) { const ls = lastSend.get(id); if (ls) { j.redirected = !!ls.redirected; j.intendedTo = ls.intendedTo || ''; j.to = ls.to; } }
   const rawLogo = new Map(); for (const j of merged.values()) if (httpOnly(j.logo)) rawLogo.set(j.id, j.logo);
   const jobs = [...merged.values()].map((j) => ({ id: j.id, title: j.title || '', company: j.company || '', location: j.location || '', url: /^https?:\/\//.test(j.url || '') ? j.url : '', source: j.source || '', score: j.score ?? null, reason: j.reason || '', status: j.status, group: STATUS_GROUP[j.status] || 'other', to: j.to || '', intendedTo: j.intendedTo || '', redirected: !!j.redirected, subject: j.subject || '', note: j.note || '', ts: j.ts, salary: j.salary || '', jobType: j.jobType || '', tags: Array.isArray(j.tags) ? j.tags.slice(0, 6) : [], category: j.category || '', hasLogo: rawLogo.has(j.id), postedAt: j.postedAt || 0, summary: j.summary || '', highlights: Array.isArray(j.highlights) ? j.highlights.slice(0, 3) : [], concerns: Array.isArray(j.concerns) ? j.concerns.slice(0, 2) : [], applyUrl: httpOnly(j.applyUrl), contactSource: j.contactSource || '', hasDesc: !!j.desc, hasDraft: !!j.draft, failedAttempts: failedAttempts.get(j.id) || 0 }));
   jobs.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
