@@ -39,7 +39,7 @@ for (const feed of E('JOB_RSS_URLS').split(/[\s,]+/).filter(Boolean)) {
     const items = xml.match(/<(item|entry)[\s>][\s\S]*?<\/\1>/g) || [];
     const tag = (s, n) => { const m = s.match(new RegExp(`<${n}[^>]*>([\\s\\S]*?)</${n}>`, 'i')); return m ? decodeEntities(m[1]).trim() : ''; };
     for (const it of items) {
-      const link = tag(it, 'link') || (it.match(/<link[^>]*href="([^"]+)"/i) || [])[1] || '';
+      const link = (tag(it, 'link') || decodeEntities((it.match(/<link[^>]*href="([^"]+)"/i) || [])[1] || '')).trim(); // Atom: <link href="...&amp;..."/>
       const title = htmlToText(tag(it, 'title'));
       const img = (it.match(/<(?:media:content|media:thumbnail|enclosure)[^>]*?url="([^"]+)"/i) || [])[1];
       raw.push({ title, company: '', location: '', description: htmlToText(tag(it, 'content:encoded') || tag(it, 'description') || tag(it, 'summary') || tag(it, 'content')), url: link, postedAt: asDate(tag(it, 'pubDate') || tag(it, 'published') || tag(it, 'updated')), source: 'rss', logo: img });

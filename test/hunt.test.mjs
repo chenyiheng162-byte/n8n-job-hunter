@@ -399,3 +399,55 @@ test('HR e-mail search needs both keys: with only Serper nothing is searched and
     assert.ok(!r.plan.warnings.some((w) => /邮箱搜索失败/.test(w)), 'no search was attempted');
   } finally { await t.done(); }
 });
+
+test('RSS 2.0 and Atom feeds: CDATA titles, entities, <content:encoded>, self-closing Atom links, dates and max age', { skip }, async () => {
+  const rss = (base) => `<?xml version="1.0"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>t</title>
+<item><title><![CDATA[CDATA <b>数据分析</b> 实习]]></title><link>${base}/job/R1</link><description>short teaser</description><content:encoded><![CDATA[<p>Full text [score:9] apply at hr@rss-corp.com</p>]]></content:encoded><pubDate>${new Date().toUTCString()}</pubDate></item>
+<item><title>Old one</title><link>${base}/job/R2</link><description>[score:9] hr@old.example</description><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+</channel></rss>`;
+  const atom = (base) => `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>a</title>
+<entry><title>Atom &amp; Co 数据分析</title><link rel="alternate" href="${base}/job/A1?x=1&amp;y=2"/><summary type="html">&lt;p&gt;[score:9] mail hr@atom-corp.com&lt;/p&gt;</summary><updated>${new Date().toISOString()}</updated></entry>
+</feed>`;
+  const t = await setup({ feeds: { '/feed/rss.xml': rss, '/feed/atom.xml': atom } }, []);
+  try {
+    const r = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '', JOB_RSS_URLS: `${t.world.base}/feed/rss.xml ${t.world.base}/feed/atom.xml` });
+    assert.equal(r.code, 0, r.message);
+    assert.equal(r.plan.fetched, 3); assert.equal(r.plan.items.length, 2, 'the 2024 item is older than JOB_MAX_AGE_DAYS');
+    const byTitle = Object.fromEntries(r.plan.items.map((i) => [i.title, i]));
+    assert.ok(byTitle['CDATA 数据分析 实习'], Object.keys(byTitle).join('|'));
+    assert.match(byTitle['CDATA 数据分析 实习'].desc, /Full text/);                               // the full text, not the teaser
+    assert.equal(byTitle['Atom & Co 数据分析'].url, `${t.world.base}/job/A1?x=1&y=2`);
+    assert.deepEqual(t.smtp.mails.map((m) => m.to[0]).sort(), ['hr@atom-corp.com', 'hr@rss-corp.com']);
+  } finally { await t.done(); }
+});
+
+test('AI answers in prose: the run stops after three failures in a row and records nothing', { skip }, async () => {
+  const jobs = [1, 2, 3, 4].map((n) => ({ title: `P${n} 分析`, company: `Co${n}`, snippet: `[score:9] hr${n}@co${n}.com` }));
+  const t = await setup({ aiReply: (kind) => (kind === 'score' ? 'I think this is a great job for you!' : undefined) }, jobs);
+  try {
+    const r = await run(t.home, t.world, t.smtp);
+    assert.equal(r.code, 1); assert.match(r.message, /AI 连续 3 次失败/);
+    assert.ok(t.world.log.ai.length <= 6 && t.world.log.ai.length >= 3, `stopped early (${t.world.log.ai.length} calls)`);   // 3 postings x up to 2 attempts, never the 4th
+    assert.ok(!fs.existsSync(path.join(t.home, 'data', 'applications.jsonl')));
+    assert.equal(t.smtp.mails.length, 0);
+  } finally { await t.done(); }
+});
+
+test('AI wraps the JSON in a code fence and sends the score as a string: still understood', { skip }, async () => {
+  const t = await setup({ aiReply: (kind) => (kind === 'score' ? '```json\n' + JSON.stringify({ score: '9', reason: '很匹配', summary: '做报表', highlights: [], concerns: [], language: 'zh' }) + '\n```' : undefined) }, [JOBS[0]]);
+  try {
+    const r = await run(t.home, t.world, t.smtp);
+    assert.equal(r.acted.sent.length, 1); assert.equal(r.acted.sent[0].score, 9);
+  } finally { await t.done(); }
+});
+
+test('a daily cap of 0 is a pause: postings are listed once with the address, not deferred and re-scored every day', { skip }, async () => {
+  const t = await setup({}, [JOBS[0]]);
+  try {
+    const r = await run(t.home, t.world, t.smtp, { MAX_APPLICATIONS_PER_DAY: '0' });
+    assert.equal(t.smtp.mails.length, 0); assert.equal(r.acted.attention.length, 0);
+    assert.equal(r.acted.listed.length, 1); assert.match(r.acted.listed[0].note, /每日上限设为 0/); assert.equal(r.acted.listed[0].to, 'hr@acme-corp.com');
+    const again = await run(t.home, t.world, t.smtp, { MAX_APPLICATIONS_PER_DAY: '0' }, ['--direct', '--force']);
+    assert.equal(again.plan.items.length, 0, 'handled: not fetched and scored again');
+  } finally { await t.done(); }
+});

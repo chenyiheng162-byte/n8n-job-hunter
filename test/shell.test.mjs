@@ -59,3 +59,11 @@ test('install.sh reads the previously chosen run time back from the settings fil
   assert.equal(s.status, 0, s.stderr);
   assert.equal(fs.readFileSync(cfg, 'utf8'), "AI_MODEL='m'\nHUNT_TIME='07:15'\n"); assert.equal(fs.statSync(cfg).mode & 0o777, 0o600);
 });
+
+test('the console page never builds HTML from strings (third-party text is only ever text)', () => {
+  for (const f of ['scripts/console/app.js', 'scripts/console/index.html']) {
+    const code = fs.readFileSync(path.join(root, f), 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    const m = code.match(/\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML|document\.write|createContextualFragment|\bon[a-z]+\s*=\s*["']/);
+    assert.equal(m, null, `${f} uses ${m && m[0]}`);
+  }
+});

@@ -129,7 +129,7 @@ export async function act({ plan, store, ctx, send, log = () => {} }) {
   const out = { sent: [], listed: [], skipped: [], attention: [] };
   const cap = num('MAX_APPLICATIONS_PER_DAY', 10);
   const cooldownMs = num('RECIPIENT_COOLDOWN_DAYS', 30) * 86400000;
-  const canSend = s.AUTO_SEND !== 'off' && !!send && !ctx.dryRun;
+  const canSend = s.AUTO_SEND !== 'off' && !!send && !ctx.dryRun && cap > 0; // a cap of 0 is a pause: listed once, like AUTO_SEND=off (not deferred and re-scored every day)
   let count = store.sentToday();
   const used = new Set();
   // what the console shows on a card: kept in the event so the page needs nothing else (the long description only for postings the user may act on)
@@ -147,7 +147,7 @@ export async function act({ plan, store, ctx, send, log = () => {} }) {
     const redirect = (s.MAIL_REDIRECT_TO || '').toLowerCase();
     const to = redirect || intended;
     const extra = redirect ? { intendedTo: intended, redirected: true } : {};
-    if (!canSend) { manual(it, ctx.dryRun ? '（试运行：没有发送）' : '邮件已写好但没有发送（未开启自动投递或没配好发信邮箱）'); continue; }
+    if (!canSend) { manual(it, ctx.dryRun ? '（试运行：没有发送）' : cap <= 0 && send && s.AUTO_SEND !== 'off' ? '邮件已写好但没有发送（每日上限设为 0）' : '邮件已写好但没有发送（未开启自动投递或没配好发信邮箱）'); continue; }
     if (used.has(intended) || (!redirect && Date.now() - store.lastContact(intended) < cooldownMs)) { manual(it, `近期已给 ${intended} 发过邮件，这次改为列出，请自己决定`); continue; }
     if (count >= cap) { out.attention.push({ ...it, note: `今天已达每日上限 ${cap} 封，留到明天（不记录，明天会重新评估）` }); continue; }
 
