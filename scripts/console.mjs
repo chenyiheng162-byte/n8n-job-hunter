@@ -18,6 +18,7 @@ import { homeDir, loadConfig, applyChanges, SECRET_KEYS } from './lib/config.mjs
 import { parseProfile, renderProfile, validateProfile, emptyProfile } from './lib/profile.mjs';
 import { lockBusy, acquireLock } from './lib/lock.mjs';
 import { startSink, sinkCount } from './lib/sink.mjs';
+import { runtimeCandidates } from './lib/runtime.mjs';
 import { REGIONS, DEFAULT_REGION, searchLocation } from './lib/regions.mjs';
 import { sourceStatus } from './lib/sources.mjs';
 import { Store, loadNodemailer, makeTransport, fromAddress, usesSink, sinkWithoutTestMode, isLocalHost, SINK_FROM } from './hunt.mjs';
@@ -257,7 +258,9 @@ function startRun(ctx, mode) {
   if (r.proc || lockBusy(ctx.home)) return { ok: false, message: '已经有一次运行在进行中' };
   const args = [path.join(ctx.scriptsDir, 'hunt.mjs'), ...(mode === 'dry' ? ['--dry-run'] : ['--force'])];
   r.mode = mode; r.startedAt = Date.now(); r.lines = []; r.code = null;
-  const env = { ...ctx.env, JOBHUNT_HOME: ctx.home };
+  // the run needs the runtime's node and n8n on PATH, however the console itself was started
+  const rt = runtimeCandidates(ctx.env, ctx.home).find((c) => fs.existsSync(path.join(c, 'node_modules', '.bin', 'n8n')));
+  const env = { ...ctx.env, JOBHUNT_HOME: ctx.home, ...(rt ? { JOBHUNT_RUNTIME: rt, PATH: `${path.join(rt, '.runtime', 'node', 'bin')}:${path.join(rt, 'node_modules', '.bin')}:${ctx.env.PATH || ''}` } : {}) };
   const proc = spawn(ctx.nodeBin, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
   r.proc = proc;
   const buf = { out: '', err: '' };

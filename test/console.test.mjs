@@ -496,3 +496,15 @@ test('a posting that failed three times is shown as such (no further automatic r
     assert.deepEqual([j.status, j.group, j.failedAttempts], ['failed', 'attention', 3]);
   } finally { await c.close(); }
 });
+
+test('a run started from the console gets the runtime (node, n8n) on its PATH whatever started the console', async () => {
+  const rt = tmpdir('jh-rt-'); fs.mkdirSync(path.join(rt, 'node_modules', '.bin'), { recursive: true }); fs.writeFileSync(path.join(rt, 'node_modules', '.bin', 'n8n'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const c = await boot({ env: { PATH: '/usr/bin:/bin', JOBHUNT_RUNTIME: rt } });
+  try {
+    fs.writeFileSync(path.join(c.home, 'profile.md'), '');   // unconfigured: the run exits at once, we only look at its environment
+    c.ctx.nodeBin = '/bin/sh'; c.ctx.scriptsDir = tmpdir('jh-sd-'); fs.writeFileSync(path.join(c.ctx.scriptsDir, 'hunt.mjs'), '');   // (/bin/sh runs the empty file and exits 0)
+    const seen = tmpdir('jh-env-'); fs.writeFileSync(path.join(c.ctx.scriptsDir, 'hunt.mjs'), `echo "$PATH" > ${JSON.stringify(path.join(seen, 'path'))}\n`);
+    assert.equal((await c.call('POST', '/api/run', { mode: 'dry' })).json.ok, true); await waitDone(c);
+    assert.ok(fs.readFileSync(path.join(seen, 'path'), 'utf8').startsWith(`${path.join(rt, '.runtime', 'node', 'bin')}:${path.join(rt, 'node_modules', '.bin')}:`));
+  } finally { await c.close(); }
+});

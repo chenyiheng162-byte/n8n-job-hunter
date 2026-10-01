@@ -75,7 +75,7 @@ export async function runN8n({ env, home, planFile, expectedBuild, timeoutMs = 3
   fs.mkdirSync(e.N8N_USER_FOLDER, { recursive: true });
   log('正在运行工作流：抓取职位 → AI 评分 → 找投递邮箱 → AI 写信（通常 1–5 分钟，期间没有进度输出）…');
   const t0 = Date.now();
-  const { stdout, code, killed } = await new Promise((resolve) => {
+  const { stdout, code, killed, err } = await new Promise((resolve) => {
     const p = spawn('n8n', ['execute', `--id=${WORKFLOW_ID}`, '--rawOutput'], { env: e, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = ''; let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; p.kill('SIGTERM'); setTimeout(() => p.kill('SIGKILL'), 10000); }, timeoutMs);
@@ -88,7 +88,7 @@ export async function runN8n({ env, home, planFile, expectedBuild, timeoutMs = 3
   let exec = null;
   const i = stdout.indexOf('\n{'); const start = stdout.startsWith('{') ? 0 : i + 1;
   try { exec = JSON.parse(stdout.slice(start)); } catch (err) { /* not an execution record */ }
-  if (!exec || !exec.data) throw Object.assign(new Error(`n8n 没有执行工作流（退出码 ${code}）：${stdout.split('\n').slice(-3).join(' ').slice(0, 200)}`), { notExecuted: true });
+  if (!exec || !exec.data) throw Object.assign(new Error(`n8n 没有执行工作流（退出码 ${code}）：${err ? (err.code === 'ENOENT' ? 'PATH 里找不到 n8n 命令' : err.message) : stdout.split('\n').slice(-3).join(' ').slice(0, 200) || '没有输出'}`), { notExecuted: true });
   const rd = exec.data.resultData || {};
   if (rd.error || exec.status === 'error' || !fs.existsSync(planFile)) {
     const msg = (rd.error && (rd.error.message || rd.error.description)) || '工作流没有产出计划';
