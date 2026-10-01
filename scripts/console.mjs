@@ -198,11 +198,13 @@ async function testAi(ctx) {
       if (ids.length && !ids.includes(model)) return { ok: false, message: `连接成功，但没有模型 "${model}"${s.AI_MODEL ? '' : '（没填模型时就用它）'}。可用的有：${ids.slice(0, 8).join('、')}` };
     } else if (m.status === 401 || m.status === 403) return { ok: false, message: '密钥不对或没有权限（401/403）' };
     // one real call shaped like the run's (JSON mode included), so a server that rejects response_format fails HERE, not tomorrow
-    const body = { model, temperature: 0, max_tokens: 20, messages: [{ role: 'system', content: '只输出 JSON。' }, { role: 'user', content: '请只回复 {"ok": true}' }] };
+    // (no small max_tokens: a model that reasons first spends its budget on the reasoning and answers with an empty body)
+    const body = { model, temperature: 0, max_tokens: 1000, messages: [{ role: 'system', content: '只输出 JSON。' }, { role: 'user', content: '请只回复 {"ok": true}' }] };
     if (s.AI_JSON_MODE !== 'off') body.response_format = { type: 'json_object' };
     const c = await fetchJson(`${base}/chat/completions`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (c.ok) { const t = c.json && c.json.choices && c.json.choices[0] && c.json.choices[0].message && c.json.choices[0].message.content; const a = String(t || '').indexOf('{'); let parsed = null; try { parsed = JSON.parse(String(t).slice(a, String(t).lastIndexOf('}') + 1)); } catch (e) { /* no json */ }
-      return parsed ? { ok: true, message: `连接成功，模型 ${model} 可用，会按 JSON 回答` } : { ok: false, message: `模型 ${model} 能连上，但回答里没有 JSON（评分和写信都需要 JSON）：${redactAll(String(t || '').slice(0, 80), ctx.secrets())}` }; }
+      const fin = c.json && c.json.choices && c.json.choices[0] && c.json.choices[0].finish_reason;
+      return parsed ? { ok: true, message: `连接成功，模型 ${model} 可用，会按 JSON 回答` } : { ok: false, message: `模型 ${model} 能连上，但回答里没有 JSON（评分和写信都需要 JSON）：${fin === 'length' ? '回答被长度截断了' : t ? redactAll(String(t).slice(0, 80), ctx.secrets()) : '回答为空'}` }; }
     if (c.status === 404) return { ok: false, message: `接口返回 404：接口地址应只填到根路径（例如 https://api.deepseek.com，不带 /chat/completions），或者模型名 "${model}" 不存在` };
     if (c.status === 400 && /response_format|json_object/i.test(c.text)) return { ok: false, message: '接口不支持 response_format（JSON 模式）：把「要求接口按 JSON 格式回答」关掉再试' };
     return { ok: false, message: `接口返回 ${c.status}：${redactAll(c.text.slice(0, 120), ctx.secrets())}` };
