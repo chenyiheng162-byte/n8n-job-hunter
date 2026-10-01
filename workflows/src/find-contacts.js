@@ -53,7 +53,7 @@ for (const j of input.jobs) {
   let source = 'posting';
   if (!found.length && fetchable(j.url)) {
     try {
-      const page = await http({ method: 'GET', url: j.url, headers: { 'User-Agent': UA }, timeout: 15000 });
+      const page = await http({ method: 'GET', url: j.url, headers: { 'User-Agent': UA }, timeout: 15000, redirectAllowed: fetchable }); // (redirectAllowed: honoured by the direct engine; n8n's helper follows redirects on its own)
       const html = typeof page === 'string' ? page.slice(0, 300000) : JSON.stringify(page).slice(0, 300000);
       found = emailsIn(html).filter(ok);
       source = 'page';

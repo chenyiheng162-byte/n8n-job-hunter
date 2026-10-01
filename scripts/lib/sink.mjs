@@ -27,7 +27,7 @@ export function startSink({ dir, port = 5725 }) {
         const line = buf.slice(0, nl); buf = buf.slice(nl + 2); const u = line.toUpperCase();
         // Only SMTP clients, which greet first. A browser page can reach 127.0.0.1:5725 with fetch(): its request line is
         // not a greeting, so the connection is closed before anything could be stored.
-        if (!greeted) { if (u.startsWith('EHLO') || u.startsWith('HELO')) greeted = true; else { sock.end('554 not an SMTP client\r\n'); return; } }
+        if (!greeted) { if (/^(EHLO|HELO) [^\s\/]+$/i.test(line.trim())) greeted = true; else { sock.end('554 not an SMTP client\r\n'); return; } }   // "EHLO / HTTP/1.1" (fetch with a custom method) is not a greeting
         if (u.startsWith('EHLO') || u.startsWith('HELO')) sock.write('250-test mailbox\r\n250-AUTH PLAIN LOGIN\r\n250 8BITMIME\r\n');
         else if (authStep) { authStep -= 1; sock.write(authStep ? '334 UGFzc3dvcmQ6\r\n' : '235 ok\r\n'); }   // AUTH LOGIN: any user name, any password
         else if (u === 'AUTH LOGIN') { authStep = 2; sock.write('334 VXNlcm5hbWU6\r\n'); }

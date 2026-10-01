@@ -401,8 +401,10 @@ test('the local test mailbox only talks to SMTP clients: a browser request is cl
   const { default: net } = await import('node:net');
   const dir = tmpdir('jh-sink-'); const sink = startSink({ dir, port: 0 }); await new Promise((r) => sink.once('listening', r));
   try {
-    const reply = await new Promise((resolve) => { let out = ''; const s = net.connect(sink.address().port, '127.0.0.1', () => s.write('POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 30\r\n\r\nDATA\r\nSubject: x\r\n\r\nhello\r\n.\r\n')); s.on('data', (d) => { out += d; }); s.on('close', () => resolve(out)); s.on('error', () => resolve(out)); });
-    assert.match(reply, /554/); assert.equal(sinkCount(dir), 0);
+    const talk = (payload) => new Promise((resolve) => { let out = ''; const s = net.connect(sink.address().port, '127.0.0.1', () => s.write(payload)); s.on('data', (d) => { out += d; }); s.on('close', () => resolve(out)); s.on('error', () => resolve(out)); });
+    assert.match(await talk('POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 30\r\n\r\nDATA\r\nSubject: x\r\n\r\nhello\r\n.\r\n'), /554/);
+    assert.match(await talk('EHLO / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\nRCPT TO:<a@b>\r\nDATA\r\nSubject: spam\r\n\r\nx\r\n.\r\n'), /554/);   // fetch() with a custom method
+    assert.equal(sinkCount(dir), 0);
   } finally { sink.close(); }
 });
 
@@ -467,5 +469,18 @@ test('a skipped posting can be rescued into 待投递, old to-dos can be dismiss
     const st = (await c.call('GET', '/api/state')).json;
     assert.deepEqual([st.test.sink.inUse, st.test.autoSendOff], [true, true]); assert.ok(st.configErrors.length === 1);
     assert.match(st.checklist.find((i) => i.id === 'mail').detail, /自动发送已关闭/);
+  } finally { await c.close(); }
+});
+
+test('清除测试记录 never removes a posting whose last send was real, even if an earlier attempt was a test send', async () => {
+  const c = await boot();
+  try {
+    const a = '1'.repeat(16); const b = '2'.repeat(16);
+    c.ctx.appendEvent({ id: a, status: 'failed', title: 'A', to: 'test@localhost.test', intendedTo: 'hr@a.com', redirected: true });   // day 1: test mode, failed
+    c.ctx.appendEvent({ id: a, status: 'sending', title: 'A', to: 'hr@a.com' }); c.ctx.appendEvent({ id: a, status: 'sent', title: 'A', to: 'hr@a.com' });   // day 2: the real send
+    c.ctx.appendEvent({ id: b, status: 'sent', title: 'B', to: 'me@example.net', intendedTo: 'hr@b.com', redirected: true });
+    const r = (await c.call('POST', '/api/jobs/clear-test')).json; assert.deepEqual([r.ok, r.removed], [true, 1]);
+    const jobs = (await c.call('GET', '/api/jobs')).json.jobs;
+    assert.equal(jobs.find((j) => j.id === a).status, 'sent', 'the real send record stays (no second mail to hr@a.com)'); assert.ok(!jobs.some((j) => j.id === b));
   } finally { await c.close(); }
 });

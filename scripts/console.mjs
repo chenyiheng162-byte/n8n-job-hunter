@@ -370,9 +370,11 @@ export function createApi(ctx) {
       try {
         const file = path.join(ctx.home, 'data', 'applications.jsonl'); let text = ''; try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return { ok: true, removed: 0 }; }
         const lines = text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
-        // only test-sent postings the user has NOT decided about (an 我已投递 / 忽略 mark is kept, with its history)
-        const last = new Map(); for (const e of lines) if (e.id && e.status) last.set(e.id, e.status);
-        const ids = new Set(lines.filter((e) => e.redirected && !['applied', 'dismissed'].includes(last.get(e.id))).map((e) => e.id));
+        // Only postings whose LAST send was a test send (a posting may have a real send after an earlier test-mode attempt:
+        // that real record must stay), and that the user has NOT decided about (an 我已投递 / 忽略 mark is kept, with its history).
+        const last = new Map(); const lastSend = new Map();
+        for (const e of lines) { if (!e.id || !e.status) continue; last.set(e.id, e.status); if (e.to !== undefined && ['sending', 'sent', 'unknown', 'failed'].includes(e.status)) lastSend.set(e.id, e); }
+        const ids = new Set([...lastSend.entries()].filter(([id, e]) => e.redirected && !['applied', 'dismissed'].includes(last.get(id))).map(([id]) => id));
         if (!ids.size) return { ok: true, removed: 0 };
         const tmp = `${file}.tmp-${process.pid}`; fs.writeFileSync(tmp, lines.filter((e) => !ids.has(e.id)).map((e) => JSON.stringify(e)).join('\n') + '\n'); fs.renameSync(tmp, file);
         const dir = path.join(ctx.home, 'data', 'sent'); try { for (const f of fs.readdirSync(dir)) if ([...ids].some((id) => f.endsWith(`-${id}.txt`))) fs.rmSync(path.join(dir, f)); } catch (e) { /* none */ }

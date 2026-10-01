@@ -84,18 +84,25 @@ const decodeEntities = (s) => String(s || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]
 const htmlToText = (h) => decodeEntities(String(h || '').replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<br\s*\/?>|<\/(p|div|li|h\d|tr)>/gi, '\n').replace(/<[^>]+>/g, ' '))
   .replace(/[ \t\f\v ]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
 
-// A link that came from a feed or a board may point anywhere. Before fetching such a page: http(s) only, and never this
-// computer or the local network (a feed must not be able to make the morning run call a router or a local service).
+// A link that came from a feed or a board may point anywhere. Before fetching such a page: http(s) only, a plain DNS name
+// or a strict public dotted-quad IP, and never this computer or the local network (a feed must not be able to make the
+// morning run call a router or a local service). Anything unusual (user@host, IPv6, "127.1", "0x7f.0.0.1", "0177.0.0.1",
+// a trailing dot, a single-label name, reserved TLDs) is refused: being a whitelist, odd spellings cannot slip through.
 // Tests, which serve their fake pages on 127.0.0.1, set JOBHUNT_ALLOW_LOCAL_FETCH=on.
 const privateV4 = (h) => { const [a, b] = h.split('.').map(Number); return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127); };
 function fetchable(u) {
-  const m = String(u || '').match(/^https?:\/\/(\[[^\]]+\]|[^\/?#:]+)(?::\d+)?(?:[\/?#]|$)/i); if (!m) return false;
+  const m = String(u || '').match(/^https?:\/\/([^\/?#]*)(?:[\/?#]|$)/i); if (!m) return false;
   if (E('JOBHUNT_ALLOW_LOCAL_FETCH') === 'on') return true;
-  const h = m[1].replace(/^\[|\]$/g, '').toLowerCase();
-  if (h === 'localhost' || /\.(local|internal|localdomain|home|lan|localhost)$/.test(h) || !h.includes('.') && !h.includes(':')) return false;
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return !privateV4(h);
-  if (h.includes(':')) return !(h === '::1' || h === '::' || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith('::ffff:'));
-  return true;
+  const auth = m[1]; if (auth.includes('@') || auth.startsWith('[')) return false;           // no user info, no IPv6 literal
+  const h = auth.replace(/:\d*$/, '').toLowerCase().replace(/\.$/, '');                    // without port and trailing dot
+  const labels = h.split('.');
+  if (!/[a-z]/.test(h) || /^\d+$/.test(labels[labels.length - 1]) || labels.some((l) => /^0x/.test(l))) { // an address, not a name (a TLD is never numeric): only a strict decimal dotted quad
+    const q = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/); if (!q) return false;
+    if (q.slice(1).some((x) => Number(x) > 255 || (x.length > 1 && x.startsWith('0')))) return false;
+    return !privateV4(h);
+  }
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(h)) return false;                               // a plain DNS name with a dot
+  return !/\.(local|internal|localdomain|home|lan|localhost|test|example|invalid|onion)$/.test(h);
 }
 
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;

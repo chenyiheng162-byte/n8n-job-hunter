@@ -100,3 +100,10 @@ export function baseEnv(home, world, smtp, extra = {}) {
     ...extra,
   };
 }
+
+// The workflow's shared helpers (workflows/src/lib/common.js), evaluated the way a stage sees them, for unit tests.
+export function loadCommon(env = {}) {
+  const src = fs.readFileSync(new URL('../workflows/src/lib/common.js', import.meta.url), 'utf8');
+  const fn = new Function('require', '$env', '$input', `${src}\nreturn { fetchable, canonicalUrl, jobIdOf, emailsIn, decodeEntities, htmlToText };`);
+  return fn.call({ helpers: { httpRequest: async () => { throw new Error('no http in unit tests'); } } }, createRequire(import.meta.url), env, undefined);
+}

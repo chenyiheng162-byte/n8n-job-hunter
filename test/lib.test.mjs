@@ -6,7 +6,9 @@ import { spawn } from 'node:child_process';
 import { acquireLock, lockBusy } from '../scripts/lib/lock.mjs';
 import { parseProfile, renderProfile, validateProfile, emptyProfile } from '../scripts/lib/profile.mjs';
 import { parseConfig, applyChanges, loadConfig, SECRET_KEYS, SECRET } from '../scripts/lib/config.mjs';
-import { tmpdir, TEST_PROFILE } from './helpers.mjs';
+import { tmpdir, TEST_PROFILE, loadCommon } from './helpers.mjs';
+import http from 'node:http';
+import { makeHttp } from '../scripts/engine.mjs';
 import { REGIONS, searchLocation } from '../scripts/lib/regions.mjs';
 
 test('lock: a second holder is refused, release frees it, and a killed holder frees it too', async () => {
@@ -83,4 +85,30 @@ test('profile: the shipped template filled in by hand (headings with a note in b
 test('which settings are secrets: keys, passwords, webhooks and feed links, but not the search keywords', () => {
   assert.deepEqual(SECRET_KEYS.sort(), ['AI_API_KEY', 'DISCORD_WEBHOOK_URL', 'JOB_RSS_URLS', 'JOOBLE_API_KEY', 'MAILBOXLAYER_API_KEY', 'SERPER_API_KEY', 'SMTP_PASS']);
   assert.equal(SECRET.test('JOB_KEYWORDS'), false);
+});
+
+test('which links a posting page may be fetched from: public DNS names and plain public IPs only, whatever the spelling', () => {
+  const { fetchable, canonicalUrl } = loadCommon({});
+  for (const ok of ['https://boards.greenhouse.io/acme/jobs/1', 'http://jobs.example-corp.com:8080/x?y=1', 'https://93.184.216.34/p', 'https://1password.com/jobs']) assert.equal(fetchable(ok), true, ok);
+  for (const bad of ['http://127.0.0.1/', 'http://127.0.0.1./', 'http://127.1/', 'http://0x7f.0.0.1/', 'http://0177.0.0.1/', 'http://2130706433/', 'http://localhost/', 'http://localhost./', 'http://intranet/', 'http://router.lan/', 'http://x.local/', 'http://[::1]/', 'http://[::ffff:127.0.0.1]/', 'http://user@127.0.0.1/', 'http://a@b.com/', 'http://10.0.0.5/', 'http://192.168.1.1/', 'http://169.254.169.254/latest', 'http://100.64.0.1/', 'ftp://x.com/', 'javascript:alert(1)', 'https://evil.test/', 'https://x.example/']) assert.equal(fetchable(bad), false, bad);
+  assert.equal(loadCommon({ JOBHUNT_ALLOW_LOCAL_FETCH: 'on' }).fetchable('http://127.0.0.1:1234/job/x'), true, 'tests may fetch their fake pages');
+  assert.equal(canonicalUrl('https://jooble.org/desc/123?ckey=a&pos=1'), 'https://jooble.org/desc/123');
+  assert.equal(canonicalUrl('https://example.com/j/1?id=7&utm_source=x'), 'https://example.com/j/1?id=7');
+});
+
+test('the direct engine checks every redirect hop when asked to (a public page must not bounce the fetch to a local address)', async () => {
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/bounce') { res.writeHead(302, { Location: '/final' }); return res.end(); }
+    if (req.url === '/loop') { res.writeHead(302, { Location: '/loop' }); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('final page');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${srv.address().port}`; const seen = [];
+  try {
+    assert.equal(await makeHttp()({ url: `${base}/bounce`, redirectAllowed: (u) => { seen.push(u); return true; } }), 'final page');
+    assert.deepEqual(seen, [`${base}/final`]);
+    await assert.rejects(makeHttp()({ url: `${base}/bounce`, redirectAllowed: () => false }), /disallowed/);
+    await assert.rejects(makeHttp()({ url: `${base}/loop`, redirectAllowed: () => true }), /too many redirects/);
+    assert.equal(await makeHttp()({ url: `${base}/bounce` }), 'final page', 'without the option redirects are simply followed');
+  } finally { srv.close(); }
 });

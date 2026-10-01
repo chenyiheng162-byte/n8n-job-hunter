@@ -30,12 +30,24 @@ async function readBody(res, ctl) {
 }
 // Same contract as n8n's `this.helpers.httpRequest` for the options the stages use.
 export function makeHttp(fetchImpl = globalThis.fetch) {
-  return async function httpRequest({ method = 'GET', url, headers = {}, body, json = false, timeout = 30000 }) {
+  // redirectAllowed(url): when given, redirects are followed by hand and every hop must pass it (a posting page must not
+  // bounce the fetch to this computer or the LAN); at most 5 hops.
+  return async function httpRequest({ method = 'GET', url, headers = {}, body, json = false, timeout = 30000, redirectAllowed = null }) {
     const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), timeout);
     try {
-      const init = { method, headers: { ...headers }, signal: ctl.signal, redirect: 'follow' };
+      const init = { method, headers: { ...headers }, signal: ctl.signal, redirect: redirectAllowed ? 'manual' : 'follow' };
       if (body !== undefined) { init.body = typeof body === 'string' ? body : JSON.stringify(body); if (!init.headers['Content-Type']) init.headers['Content-Type'] = 'application/json'; }
-      const res = await fetchImpl(url, init);
+      let target = url; let res;
+      for (let hop = 0; ; hop++) {
+        res = await fetchImpl(target, init);
+        const loc = redirectAllowed && res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+        if (!loc) break;
+        try { await res.arrayBuffer(); } catch (e) { /* drained */ }
+        if (hop >= 5) throw new Error('too many redirects');
+        const next = new URL(loc, target).href;
+        if (!redirectAllowed(next)) throw Object.assign(new Error('redirect to a disallowed address'), { httpCode: res.status });
+        target = next;
+      }
       const text = await readBody(res, ctl);
       if (!res.ok) throw Object.assign(new Error(`${res.status} ${text.slice(0, 200)}`), { httpCode: res.status });
       if (json) return JSON.parse(text);
