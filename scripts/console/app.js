@@ -216,10 +216,14 @@ async function pageHome() {
     h('button', { class: 'btn primary', id: 'run-real', on: { click: () => { if (confirm('现在真的运行一次？有邮箱的岗位会直接发出投递邮件。')) startRun('real'); } } }, icon('play'), '立即运行')));
   const lr = st.lastRun;
   run.append(h('div', { class: 'muted sm', text: lr ? `上次：${fmtTime(lr.ts)} · ${{ ok: '成功', failed: '失败', unconfigured: '未配置' }[lr.result] || lr.result}${lr.result === 'ok' ? `（${lr.testMode ? '测试模式，没有真正发出：' : ''}投递 ${lr.sent}，待你投递 ${lr.listed}${lr.deferred ? `，留到明天 ${lr.deferred}` : ''}）` : lr.message ? `：${lr.message}` : ''}` : '还没运行过' }));
-  run.append(h('pre', { class: 'log', id: 'runlog', hidden: true }), h('div', { id: 'runreport' }));
+  const logBox = h('pre', { class: 'log', id: 'runlog', hidden: true }); const repBox = h('div', { id: 'runreport' });
+  run.append(logBox, repBox);
   root.append(run);
   if (st.running) pollRun();
-  else { const last = await api('GET', '/api/run'); if (last.ok !== false && last.lines && last.lines.length) { run.insertBefore(h('div', { class: 'muted sm', text: `${last.mode === 'dry' ? '上次试运行' : '上次手动运行'}的输出（${fmtTime(last.startedAt)}）：` }), $('#runlog') || run.lastChild); showRunOutput(last.lines); } }
+  else { // the page is not in the document yet: hand the boxes over instead of looking them up
+    const last = await api('GET', '/api/run');
+    if (last.ok !== false && last.lines && last.lines.length) { run.insertBefore(h('div', { class: 'muted sm', text: `${last.mode === 'dry' ? '上次试运行' : '上次手动运行'}的输出（${fmtTime(last.startedAt)}）：` }), logBox); showRunOutput(last.lines, logBox, repBox); }
+  }
 
   if (c.todo) {
     const t = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { text: '最新的待投递' }), h('span', { class: 'grow' }), h('button', { class: 'btn ghost sm', on: { click: () => go('todo') } }, '查看全部')));
@@ -255,8 +259,8 @@ function pollRun() {
   S.runTimer = setInterval(tick, 1000); tick();
 }
 // the progress lines go in the log box; the report at the end (Markdown) is rendered like on the 日报 page
-function showRunOutput(lines) {
-  const box = $('#runlog'); const rep = $('#runreport'); if (!box || !rep) return;
+function showRunOutput(lines, box = $('#runlog'), rep = $('#runreport')) {
+  if (!box || !rep) return;
   let i = lines.length; while (i > 0 && !/^\[hunt\] /.test(lines[i - 1])) i -= 1;   // the report follows the last [hunt] line
   const log = lines.slice(0, i); const report = lines.slice(i).join('\n').trim();
   box.hidden = !log.length; box.textContent = log.map((l) => l.replace(/^\[hunt\] /, '')).join('\n'); box.scrollTop = box.scrollHeight;
