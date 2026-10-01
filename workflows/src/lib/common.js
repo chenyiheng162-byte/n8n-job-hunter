@@ -18,20 +18,35 @@ const SEARCH_LOCATION = E('JOB_LOCATION') || REGION.en;
 const sleep = (ms) => (typeof setTimeout === 'function' ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
 const http = (o) => this.helpers.httpRequest(o);
 const safe = (m) => String(m || '').replace(/https?:\/\/\S+/g, '<链接>').replace(/(key|token|bearer)[=: ]+\S+/gi, '$1=<隐藏>').slice(0, 200);
-const startedAt = Date.now();
-const overBudget = () => Date.now() - startedAt > Number(E('STAGE_BUDGET_MS', '900000'));
+// Time budget for the WHOLE run (n8n stops the workflow after 30 minutes): measured from the moment the first stage started,
+// which it passes on as `startedAt`; every later stage stops taking on new postings once it is spent.
+const runStartedAt = (() => { try { const t = Date.parse($input.first().json.startedAt); return Number.isFinite(t) ? t : Date.now(); } catch (e) { return Date.now(); } })();
+const overBudget = () => Date.now() - runStartedAt > Number(E('RUN_BUDGET_MS', '1200000'));
 
 const sha = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 16);
-const jobIdOf = (url, title = '', company = '') => {
-  const u = String(url || '').trim().replace(/#.*$/, '').replace(/[?&](utm_[a-z]+|ref|src|source|trk|trackingId)=[^&]*/gi, '').replace(/[?&]$/, '');
-  return sha(u || `${title}|${company}`);
+// The id of a posting is a hash of its link, so the same posting is recognised again tomorrow. Links from some boards carry
+// per-request tracking parameters (Jooble: ckey, pos, sid, age, scr ...; LinkedIn: refId, trackingId ...), which would give
+// the same posting a new id every day: for those boards the path alone identifies the posting, elsewhere only the
+// well-known tracking parameters are dropped.
+// (Any other link is hashed exactly as before, so the ids in an existing applications.jsonl stay valid.)
+const PATH_IS_ID = /^https?:\/\/([a-z0-9-]+\.)*(jooble\.org\/desc\/|linkedin\.com\/jobs\/view\/)/i;
+const canonicalUrl = (url) => {
+  let u = String(url || '').trim().replace(/#.*$/, '');
+  if (PATH_IS_ID.test(u)) u = u.replace(/\?.*$/, '');
+  return u.replace(/[?&](utm_[a-z]+|ref|refId|src|source|trk|trackingId|fbclid|gclid)=[^&]*/gi, '').replace(/[?&]$/, '');
 };
+const jobIdOf = (url, title = '', company = '') => { const u = canonicalUrl(url); return sha(u || `${title}|${company}`); };
 
 // ---- state: applications.jsonl is append-only; the LAST event of an id is its status ----
 // statuses: skipped | manual | sending | sent | unknown | failed.  A job is "handled" (never looked at again) once it has
 // any status, except `failed`, which is retried on later days up to 3 times.
+// Events written by the sender (hunt.mjs) carry `to`; the console's bookkeeping events (applied / dismissed / an undo that
+// restores an earlier status) never do, and must not look like a send attempt or forget a recipient.
+const SEND_STATUS = ['sending', 'sent', 'unknown', 'failed'];
+const KEY_WINDOW_MS = Math.max(Number(E('JOB_MAX_AGE_DAYS', '30')), Number(E('RECIPIENT_COOLDOWN_DAYS', '30')), 90) * 86400000; // how far back "same title and company" counts as the same vacancy: at least 90 days (boards re-date listings, so neither the age filter nor the cooldown is a safe bound)
+const isSendEvent = (ev) => SEND_STATUS.includes(ev.status) && ev.to !== undefined;
 function loadState() {
-  const jobs = new Map(); const recipients = new Map();
+  const jobs = new Map(); const recipients = new Map(); const keys = new Map();
   let text = '';
   try { text = fs.readFileSync(STATE_FILE, 'utf8'); } catch (e) { /* no history yet */ }
   for (const line of text.split('\n')) {
@@ -39,13 +54,23 @@ function loadState() {
     let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
     if (!ev || !ev.id) continue;
     const cur = jobs.get(ev.id) || { attempts: 0 };
-    if (ev.status === 'failed') cur.attempts += 1;
+    if (ev.status === 'failed' && isSendEvent(ev)) cur.attempts += 1;
     cur.status = ev.status; cur.ts = ev.ts; if (ev.score !== undefined) cur.score = ev.score;
+    if (isSendEvent(ev)) { cur.send = ev.status; cur.sendTs = ev.ts; cur.to = String(ev.to || '').toLowerCase(); cur.redirected = !!ev.redirected; }
+    if (ev.title && ev.company && Date.now() - Date.parse(ev.ts) < KEY_WINDOW_MS) { const k = `${String(ev.title).toLowerCase()}|${String(ev.company).toLowerCase()}`; if (!keys.has(k)) keys.set(k, new Set()); keys.get(k).add(ev.id); } // (a company re-posting the same role months later is a new vacancy)
     jobs.set(ev.id, cur);
-    if (ev.to && !ev.redirected && ['sending', 'sent', 'unknown'].includes(ev.status)) recipients.set(String(ev.to).toLowerCase(), ev.ts); // test-mode sends (redirected) are not real contact
+  }
+  // Addresses really written to, decided by the LAST send status of each posting: a send that certainly failed reached nobody
+  // and must not block its own retry; test-mode sends (redirected) are not real contact. Value: time of the last contact.
+  for (const s of jobs.values()) {
+    if (!s.to || s.redirected || !['sending', 'sent', 'unknown'].includes(s.send)) continue;
+    const prev = recipients.get(s.to); if (!prev || String(s.sendTs) > String(prev)) recipients.set(s.to, s.sendTs);
   }
   // A posting that was skipped for a score the user has since made acceptable (lowered MIN_SCORE) is looked at again.
-  return { jobs, recipients, handled: (id) => { const s = jobs.get(id); return !!s && !(s.status === 'failed' && s.attempts < 3) && !(s.status === 'skipped' && Number.isFinite(s.score) && s.score >= MIN_SCORE); } };
+  const handled = (id) => { const s = jobs.get(id); return !!s && !(s.status === 'failed' && s.attempts < 3) && !(s.status === 'skipped' && Number.isFinite(s.score) && s.score >= MIN_SCORE); };
+  // the same vacancy reached through another board (another link, same title and company) is not new either
+  const handledKey = (k) => [...(keys.get(k) || [])].some(handled);
+  return { jobs, recipients, handled, handledKey };
 }
 
 function readProfile() {
@@ -55,9 +80,31 @@ function readProfile() {
 // ---- text helpers ----
 const decodeEntities = (s) => String(s || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
   .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
-  .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
+  .replace(/&#(\d+);/g, (_, n) => (Number(n) > 0 && Number(n) <= 0x10FFFF ? String.fromCodePoint(Number(n)) : ''))
+  .replace(/&#x([0-9a-f]+);/gi, (_, h) => { const n = parseInt(h, 16); return n > 0 && n <= 0x10FFFF ? String.fromCodePoint(n) : ''; });
 const htmlToText = (h) => decodeEntities(String(h || '').replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<br\s*\/?>|<\/(p|div|li|h\d|tr)>/gi, '\n').replace(/<[^>]+>/g, ' '))
   .replace(/[ \t\f\v ]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
+
+// A link that came from a feed or a board may point anywhere. Before fetching such a page: http(s) only, a plain DNS name
+// or a strict public dotted-quad IP, and never this computer or the local network (a feed must not be able to make the
+// morning run call a router or a local service). Anything unusual (user@host, IPv6, "127.1", "0x7f.0.0.1", "0177.0.0.1",
+// a trailing dot, a single-label name, reserved TLDs) is refused: being a whitelist, odd spellings cannot slip through.
+// Tests, which serve their fake pages on 127.0.0.1, set JOBHUNT_ALLOW_LOCAL_FETCH=on.
+const privateV4 = (h) => { const [a, b] = h.split('.').map(Number); return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127); };
+function fetchable(u) {
+  const m = String(u || '').match(/^https?:\/\/([^\/?#]*)(?:[\/?#]|$)/i); if (!m) return false;
+  const auth = m[1]; if (auth.includes('@') || auth.startsWith('[')) return false;           // no user info, no IPv6 literal
+  const h = auth.replace(/:\d*$/, '').toLowerCase().replace(/\.$/, '');                    // without port and trailing dot
+  if (E('JOBHUNT_ALLOW_LOCAL_FETCH') === 'on' && (h === '127.0.0.1' || h === 'localhost')) return true;   // (tests only)
+  const labels = h.split('.');
+  if (!/[a-z]/.test(h) || /^\d+$/.test(labels[labels.length - 1]) || labels.some((l) => /^0x/.test(l))) { // an address, not a name (a TLD is never numeric): only a strict decimal dotted quad
+    const q = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/); if (!q) return false;
+    if (q.slice(1).some((x) => Number(x) > 255 || (x.length > 1 && x.startsWith('0')))) return false;
+    return !privateV4(h);
+  }
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(h)) return false;                               // a plain DNS name with a dot
+  return !/\.(local|internal|localdomain|home|lan|localhost|test|example|invalid|onion)$/.test(h);
+}
 
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
 const BAD_LOCAL = /^(no-?reply|do-?not-?reply|mailer-daemon|postmaster|abuse|privacy|press|webmaster|admin|root|info@?)$/i;

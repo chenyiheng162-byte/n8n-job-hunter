@@ -19,6 +19,10 @@ else
 fi
 rsync -a --delete --exclude '.git' "$STAGE/" "$WORK/repo/"
 cd "$WORK/repo"
+# get.sh and the docs name the upstream repository: a fork publishes its own name instead
+if [ "$REPO" != "chenyiheng162-byte/n8n-job-hunter" ]; then
+  for f in get.sh README.md 安装说明.md; do [ -f "$f" ] && sed -i '' "s#chenyiheng162-byte/n8n-job-hunter#$REPO#g" "$f"; done
+fi
 git config user.name "$AUTHOR_NAME"; git config user.email "$AUTHOR_EMAIL"
 git add -A
 if git diff --cached --quiet; then echo "和 GitHub 上的内容一样，没有新的提交"; else

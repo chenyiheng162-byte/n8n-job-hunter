@@ -10,24 +10,39 @@ import { WORKFLOW_ID } from './lib/constants.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-export const STAGES = [['Fetch jobs', 'fetch-jobs.js'], ['Screen jobs', 'screen-jobs.js'], ['Find contacts', 'find-contacts.js'], ['Draft emails', 'draft-emails.js'], ['Make plan', 'make-plan.js']];
+export const STAGES = [['Fetch jobs', 'fetch-jobs.js', '抓取职位'], ['Screen jobs', 'screen-jobs.js', 'AI 评分'], ['Find contacts', 'find-contacts.js', '找投递邮箱'], ['Draft emails', 'draft-emails.js', 'AI 写信'], ['Make plan', 'make-plan.js', '生成计划']];
 
 export function loadSource(name, srcDir = path.join(here, '..', 'workflows', 'src')) {
   return fs.readFileSync(path.join(srcDir, name), 'utf8').replace(/^\/\/@include (\S+)$/gm, (_, inc) => fs.readFileSync(path.join(srcDir, 'lib', inc), 'utf8'));
 }
 
+// A response body is read in chunks and given up on past MAX_BODY (a hostile feed or page must not fill memory).
+export const MAX_BODY = 8 * 1024 * 1024;
+async function readBody(res, ctl) {
+  if (!res.body || typeof res.body.getReader !== 'function') return res.text();
+  const reader = res.body.getReader(); const chunks = []; let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    n += value.length; if (n > MAX_BODY) { ctl.abort(); throw Object.assign(new Error(`response larger than ${MAX_BODY} bytes`), { tooLarge: true }); }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 // Same contract as n8n's `this.helpers.httpRequest` for the options the stages use.
 export function makeHttp(fetchImpl = globalThis.fetch) {
-  return async function httpRequest({ method = 'GET', url, headers = {}, body, json = false, timeout = 30000 }) {
+  // disableFollowRedirect / returnFullResponse / ignoreHttpStatusErrors are n8n's own option names (IHttpRequestOptions), so a
+  // stage can walk redirects by hand and get the same answers from both engines.
+  return async function httpRequest({ method = 'GET', url, headers = {}, body, json = false, timeout = 30000, disableFollowRedirect = false, returnFullResponse = false, ignoreHttpStatusErrors = false }) {
     const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), timeout);
     try {
-      const init = { method, headers: { ...headers }, signal: ctl.signal, redirect: 'follow' };
+      const init = { method, headers: { ...headers }, signal: ctl.signal, redirect: disableFollowRedirect ? 'manual' : 'follow' };
       if (body !== undefined) { init.body = typeof body === 'string' ? body : JSON.stringify(body); if (!init.headers['Content-Type']) init.headers['Content-Type'] = 'application/json'; }
       const res = await fetchImpl(url, init);
-      const text = await res.text();
-      if (!res.ok) throw Object.assign(new Error(`${res.status} ${text.slice(0, 200)}`), { httpCode: res.status });
-      if (json) return JSON.parse(text);
-      try { return JSON.parse(text); } catch (e) { return text; } // n8n parses JSON bodies automatically too
+      const text = await readBody(res, ctl);
+      if (!res.ok && !ignoreHttpStatusErrors) throw Object.assign(new Error(`${res.status} ${text.slice(0, 200)}`), { httpCode: res.status });
+      const parse = () => { if (json) { try { return JSON.parse(text); } catch (e) { if (!text) return null; throw e; } } try { return JSON.parse(text); } catch (e) { return text; } }; // n8n parses JSON bodies automatically too
+      if (returnFullResponse) return { body: parse(), headers: Object.fromEntries(res.headers.entries()), statusCode: res.status, statusMessage: res.statusText };
+      return parse();
     } catch (e) {
       if (e && e.name === 'AbortError') throw new Error(`timeout of ${timeout}ms exceeded`);
       throw e;
@@ -39,8 +54,8 @@ export async function runDirect({ env, fetchImpl, srcDir, log = () => {} }) {
   const http = makeHttp(fetchImpl);
   const req = createRequire(import.meta.url);
   let data = {};
-  for (const [name, file] of STAGES) {
-    const t = Date.now();
+  for (const [name, file, zh] of STAGES) {
+    const t = Date.now(); log(`${zh}…`);
     const fn = new AsyncFunction('require', '$env', '$input', loadSource(file, srcDir));
     const out = await fn.call({ helpers: { httpRequest: http } }, req, env, { first: () => ({ json: data }), all: () => [{ json: data }] });
     data = out[0].json; log(`${name}: ${Date.now() - t} ms`);
@@ -58,8 +73,9 @@ export async function runN8n({ env, home, planFile, expectedBuild, timeoutMs = 3
     N8N_RUNNERS_TASK_TIMEOUT: String(Math.ceil(timeoutMs / 1000)), EXECUTIONS_DATA_SAVE_ON_SUCCESS: 'none', JOBHUNT_PLAN_FILE: planFile, JOBHUNT_HOME: home,
   };
   fs.mkdirSync(e.N8N_USER_FOLDER, { recursive: true });
+  log('正在运行工作流：抓取职位 → AI 评分 → 找投递邮箱 → AI 写信（通常 1–5 分钟，期间没有进度输出）…');
   const t0 = Date.now();
-  const { stdout, code, killed } = await new Promise((resolve) => {
+  const { stdout, code, killed, err } = await new Promise((resolve) => {
     const p = spawn('n8n', ['execute', `--id=${WORKFLOW_ID}`, '--rawOutput'], { env: e, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = ''; let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; p.kill('SIGTERM'); setTimeout(() => p.kill('SIGKILL'), 10000); }, timeoutMs);
@@ -72,7 +88,7 @@ export async function runN8n({ env, home, planFile, expectedBuild, timeoutMs = 3
   let exec = null;
   const i = stdout.indexOf('\n{'); const start = stdout.startsWith('{') ? 0 : i + 1;
   try { exec = JSON.parse(stdout.slice(start)); } catch (err) { /* not an execution record */ }
-  if (!exec || !exec.data) throw Object.assign(new Error(`n8n 没有执行工作流（退出码 ${code}）：${stdout.split('\n').slice(-3).join(' ').slice(0, 200)}`), { notExecuted: true });
+  if (!exec || !exec.data) throw Object.assign(new Error(`n8n 没有执行工作流（退出码 ${code}）：${err ? (err.code === 'ENOENT' ? 'PATH 里找不到 n8n 命令' : err.message) : stdout.split('\n').slice(-3).join(' ').slice(0, 200) || '没有输出'}`), { notExecuted: true });
   const rd = exec.data.resultData || {};
   if (rd.error || exec.status === 'error' || !fs.existsSync(planFile)) {
     const msg = (rd.error && (rd.error.message || rd.error.description)) || '工作流没有产出计划';

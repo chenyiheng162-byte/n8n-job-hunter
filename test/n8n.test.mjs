@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { runHunt } from '../scripts/hunt.mjs';
@@ -27,7 +28,8 @@ test('install.sh + a real n8n run: same outcome as the direct engine, and a re-i
     const inst = spawnSync('bash', [path.join(root, 'install.sh'), '--no-schedule'], { env: { ...process.env, PATH, JOBHUNT_HOME: home, JOBHUNT_RUNTIME: runtime }, encoding: 'utf8' });
     assert.equal(inst.status, 0, inst.stderr + inst.stdout);
     writeProfile(home); // overwrite the template with a filled profile
-    const env = { PATH, JOBHUNT_RUNTIME: runtime, ...baseEnv(home, world, smtp), N8N_PORT: '5791' };
+    const port = await new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });   // not a fixed port: two runs in a row must not collide
+    const env = { PATH, JOBHUNT_RUNTIME: runtime, ...baseEnv(home, world, smtp), N8N_PORT: String(port), N8N_RUNNERS_BROKER_PORT: String(port + 1) };
     const r = await runHunt({ env, args: [], notifier: () => {}, log: () => {} });
     assert.equal(r.code, 0, r.message);
     assert.equal(smtp.mails.length, 1);

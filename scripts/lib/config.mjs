@@ -14,7 +14,7 @@ export const KEYS = [
   // endpoints that tests point at local fakes
   'JOOBLE_API_BASE', 'REMOTIVE_API_BASE', 'SERPER_API_BASE', 'MAILBOXLAYER_API_BASE',
 ];
-export const SECRET = /KEY|PASS|WEBHOOK|TOKEN|RSS/;
+export const SECRET = /(^|_)(API_KEY|KEY|PASS|PASSWORD|WEBHOOK_URL|TOKEN|RSS_URLS)$/; // (not JOB_KEYWORDS: search terms are not secret)
 // values the console must never send to the browser (it only learns "set" and a harmless hint)
 export const SECRET_KEYS = KEYS.filter((k) => SECRET.test(k) && !/_API_BASE$/.test(k));
 export const homeDir = (env = process.env) => env.JOBHUNT_HOME || path.join(os.homedir(), '.n8n-job-hunter');

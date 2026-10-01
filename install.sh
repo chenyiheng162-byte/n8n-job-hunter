@@ -14,15 +14,18 @@ set -euo pipefail
 umask 077   # everything this script creates is private to the current user
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
-[ -x "$SRC/scripts/schedule.sh" ] || chmod u+x "$SRC"/*.sh "$SRC"/scripts/*.sh "$SRC"/scripts/jobhunt 2>/dev/null || true   # some ways of copying a zip lose the executable bit
+[ -x "$SRC/scripts/schedule.sh" ] || chmod u+x "$SRC"/*.sh "$SRC"/*.command "$SRC"/scripts/*.sh "$SRC"/scripts/jobhunt 2>/dev/null || true   # some ways of copying a zip lose the executable bit
 HOME_DIR="${JOBHUNT_HOME:-$HOME/.n8n-job-hunter}"
 NODE_VERSION="v24.21.0"   # n8n 2.x needs Node >= 24
 # SHA-256 of the official tarballs, pinned here so the download is not trusted just because it matches a checksum file from the
 # same server (values from https://nodejs.org/dist/v24.21.0/SHASUMS256.txt).
 NODE_SHA256_ARM64="bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
 NODE_SHA256_X64="1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097"
-NOSCHED=0; CONSOLE=1; TIME="08:00"
+NOSCHED=0; CONSOLE=1; TIME=""
 for a in "$@"; do case "$a" in --no-schedule) NOSCHED=1 ;; --no-console) CONSOLE=0 ;; -h|--help) sed -n '2,13p' "$0"; exit 0 ;; [0-2][0-9]:[0-5][0-9]) TIME="$a" ;; *) echo "不认识的选项：$a" >&2; exit 1 ;; esac; done
+# no time given: keep the one the user chose earlier (the console / schedule.sh record it), else 08:00
+[ -n "$TIME" ] || [ ! -f "$HOME_DIR/config.local.env" ] || TIME="$(sed -n "s/^HUNT_TIME=[\"']\{0,1\}\([0-2][0-9]:[0-5][0-9]\)[\"']\{0,1\}$/\1/p" "$HOME_DIR/config.local.env" | tail -1)"   # (quoted or bare, as the loader accepts; no file yet on a fresh install: sed must not run, set -e would stop here)
+[ -n "$TIME" ] || TIME="08:00"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 [ "$((10#${TIME%%:*}))" -le 23 ] || die "小时要在 00-23 之间"
@@ -33,6 +36,8 @@ say "检查这台 Mac"
 for tool in curl tar shasum rsync sqlite3 plutil mktemp; do command -v "$tool" >/dev/null || die "缺少系统工具：${tool}"; done
 case "$(uname -m)" in arm64) PLATFORM=darwin-arm64; NODE_SHA256="$NODE_SHA256_ARM64" ;; x86_64) PLATFORM=darwin-x64; NODE_SHA256="$NODE_SHA256_X64" ;; *) die "不支持的处理器：$(uname -m)" ;; esac
 case "$SRC" in "$HOME_DIR"|"$HOME_DIR"/*) die "请在下载解压出来的文件夹里运行 install.sh，不要在 ${HOME_DIR} 里运行。" ;; esac
+# an update must not replace the scripts under a running job (and schedule.sh would refuse at the very end anyway)
+if [ -f "$HOME_DIR/run.lockf" ] && [ -x /usr/bin/lockf ]; then /usr/bin/lockf -k -s -t 0 "$HOME_DIR/run.lockf" /usr/bin/true || die "求职助手正在运行中（通常几分钟），请等它结束后再运行安装命令。什么都还没有改动。"; fi
 EXPECTED_N8N="$(sed -n 's/.*"n8n": *"\([^"]*\)".*/\1/p' "$SRC/package.json" | head -1)"
 has_runtime() { [ -x "$1/.runtime/node/bin/node" ] && [ -x "$1/node_modules/.bin/n8n" ] && [ -d "$1/node_modules/nodemailer" ]; }
 n8n_version() { PATH="$1/.runtime/node/bin:$PATH" "$1/node_modules/.bin/n8n" --version 2>/dev/null | tail -1; }
@@ -49,6 +54,7 @@ elif has_runtime "$HOME/.n8n-morning-brief" && [ "$(n8n_version "$HOME/.n8n-morn
 fi
 if [ -n "$RUNTIME" ]; then
   say "使用已有的 Node 和 n8n：${RUNTIME}（不用再下载）"
+  case "$RUNTIME" in "$HOME_DIR") ;; *) echo "注意：求职助手共用这个文件夹里的 Node 和 n8n。卸载或升级了那个项目之后，请重新运行本安装命令。" ;; esac
 else
   say "安装 Node 和 n8n（第一次需要，约 3 GB，几分钟，请保持联网）"
   VOL="$HOME_DIR"; while [ ! -d "$VOL" ]; do VOL="$(dirname "$VOL")"; done
@@ -110,7 +116,7 @@ if [ "$CONSOLE" = 1 ] && [ "$NOSCHED" != 1 ]; then
   cat <<MSG
 马上会在浏览器里打开「求职助手控制台」：按总览页的清单填个人资料、AI、职位来源（大约 5 分钟）。
 - 浏览器没有自动打开的话，把下面出现的那条 http://127.0.0.1 开头的链接复制到浏览器里。
-- 填完可以关掉这个终端窗口，每天 ${TIME} 的自动运行不受影响。以后想再打开控制台，在终端运行：
+- 填完可以关掉这个终端窗口，每天 ${TIME} 的自动运行不受影响。以后想再打开控制台：双击 ${SRC}/打开控制台.command，或在终端运行：
     ${HOME_DIR}/scripts/jobhunt console
 - 建议：让 Mac 在运行前 5 分钟自动唤醒（需要管理员密码，请你自己运行；先用 pmset -g sched 看看有没有别的定时设置）：
     sudo pmset repeat wakeorpoweron MTWRFSU ${WAKE}

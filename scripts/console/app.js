@@ -11,6 +11,7 @@ const ICONS = {
 const icon = (name) => { const s = document.createElementNS(NS, 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('class', 'i'); const p = document.createElementNS(NS, 'path'); p.setAttribute('d', ICONS[name] || ''); s.append(p); return s; };
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
+  if (attrs && (attrs.nodeType || typeof attrs === 'string' || Array.isArray(attrs))) { kids.unshift(attrs); attrs = {}; }
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v === undefined || v === null || v === false) continue;
     if (k === 'class') el.className = v; else if (k === 'on') for (const [e, f] of Object.entries(v)) el.addEventListener(e, f);
@@ -25,24 +26,32 @@ const fmtTime = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTim
 async function api(method, url, body, raw) {
   const init = { method, headers: { 'X-Jobhunt-Console': '1' } };
   if (raw) { init.body = raw; init.headers['Content-Type'] = 'application/pdf'; } else if (body !== undefined) { init.body = JSON.stringify(body); init.headers['Content-Type'] = 'application/json'; }
-  const r = await fetch(url, init); let j = {}; try { j = await r.json(); } catch (e) { /* empty */ }
-  if (!r.ok && j.ok === undefined) j.ok = false; j.httpStatus = r.status; return j;
+  let r; try { r = await fetch(url, init); } catch (e) { return { ok: false, httpStatus: 0, message: '连不上控制台：它可能已经关闭（关掉了终端窗口？），请重新运行 jobhunt console' }; }
+  let j = {}; try { j = await r.json(); } catch (e) { /* empty */ }
+  if (!r.ok && j.ok === undefined) j.ok = false; j.httpStatus = r.status;
+  if ((r.status === 403 || r.status === 421) && !j.message) j.message = '控制台已重新启动或链接已失效：请用终端里新打印的链接重新打开';
+  return j;
 }
+const gone = (...rs) => rs.find((r) => r && (r.httpStatus === 0 || r.httpStatus === 403 || r.httpStatus === 421));
 function toast(text, bad, undo) {
   const t = h('div', { class: `toast${bad ? ' bad' : ''}` }, text);
   if (undo) t.append(h('button', { class: 'btn ghost sm toast-undo', on: { click: () => { t.remove(); undo(); } } }, '撤销'));
   $('#toasts').append(t); setTimeout(() => t.remove(), undo ? 8000 : bad ? 6000 : 3000);
 }
-function modal(title, text) { $('#modal-title').textContent = title; $('#modal-body').textContent = text; $('#modal').hidden = false; }
-$('#modal-close').addEventListener('click', () => { $('#modal').hidden = true; });
-$('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') $('#modal').hidden = true; });
+let modalOpener = null;
+function modal(title, text) { modalOpener = document.activeElement; $('#modal-title').textContent = title; $('#modal-body').textContent = text; $('#modal').hidden = false; $('#modal-close').focus(); }
+function closeModal() { if ($('#modal').hidden) return; $('#modal').hidden = true; if (modalOpener && modalOpener.focus) modalOpener.focus(); }
+$('#modal-close').addEventListener('click', closeModal);
+$('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
-const S = { page: 'home', st: null, jobs: null, settings: null, profile: null, filter: 'all', runTimer: null };
+const S = { page: 'home', st: null, jobs: null, settings: null, profile: null, filter: 'all', runTimer: null, nav: 0 };
 const PAGES = [['home', '总览', 'home'], ['todo', '待投递', 'list'], ['sent', '已投递', 'mail'], ['all', '全部岗位', 'all'], ['reports', '日报', 'doc'], ['settings', '设置', 'gear']];
 
 async function refresh() {
   const [st, jobs] = await Promise.all([api('GET', '/api/state'), api('GET', '/api/jobs')]);
-  S.st = st; S.jobs = jobs; renderNav();
+  const g = gone(st, jobs) || [st, jobs].find((r) => r && r.ok === false); if (g) throw new Error(g.message || `控制台返回了错误（${g.httpStatus}）`);
+  S.st = st; S.jobs = jobs; renderNav(); tickClock();
 }
 function renderNav() {
   const nav = $('#nav'); nav.replaceChildren();
@@ -52,26 +61,38 @@ function renderNav() {
     nav.append(h('button', { class: S.page === id ? 'on' : '', on: { click: () => go(id) } }, icon(ic), label, n ? h('span', { class: `badge ${id === 'sent' ? 'warn' : 'ok'}`, text: String(n) }) : null));
   }
 }
-async function go(page, anchor) {
+async function go(page, anchor, { keepScroll = false } = {}) {
+  const my = ++S.nav; const y = window.scrollY;     // a slower, earlier navigation must not overwrite a later one
   S.page = page; renderNav();
   const view = $('#view'); view.replaceChildren(h('p', { class: 'muted', text: '加载中…' }));
-  await refresh();
-  const pages = { home: pageHome, todo: pageTodo, sent: pageSent, all: pageAll, reports: pageReports, settings: pageSettings };
-  const body = await pages[page]();
-  view.replaceChildren(testBanner(), body);
-  if (anchor) { const el = document.getElementById(anchor); if (el) el.scrollIntoView({ block: 'start' }); } else window.scrollTo(0, 0);
+  try {
+    await refresh();
+    const pages = { home: pageHome, todo: pageTodo, sent: pageSent, all: pageAll, reports: pageReports, settings: pageSettings };
+    const body = await pages[page]();
+    if (my !== S.nav) return;
+    view.replaceChildren(testBanner(), body);
+  } catch (e) {
+    if (my !== S.nav) return;
+    view.replaceChildren(h('div', { class: 'card' }, h('h2', { text: '页面没能加载' }), h('p', { class: 'muted', text: e.message || String(e) }), h('button', { class: 'btn', on: { click: () => go(page, anchor) } }, '重试')));
+    return;
+  }
+  if (anchor) { const el = document.getElementById(anchor); if (el) el.scrollIntoView({ block: 'start' }); } else window.scrollTo(0, keepScroll ? y : 0);
 }
 
 function testBanner() {
-  const t = S.st && S.st.test; if (!t || !t.redirect) return h('span');
-  return h('div', { class: 'banner' }, h('b', { text: '测试模式已开启' }), h('span', { text: `：所有投递邮件都改发到 ${t.redirect}，真正的收件人不会收到任何东西（每封邮件开头会写明"原本要发给谁"）。` }), h('button', { class: 'btn sm', on: { click: () => go('settings', 'test') } }, '去关闭'));
+  const t = S.st && S.st.test; const box = h('div');
+  if (!t) return box;
+  if (t.redirect) box.append(h('div', { class: 'banner' }, h('b', { text: '测试模式已开启' }), h('span', { text: `：所有投递邮件都改发到 ${t.redirect}，真正的收件人不会收到任何东西（每封邮件开头会写明"原本要发给谁"）。${t.sink && t.sink.inUse ? '发信服务器是本机测试邮箱：要正式投递，还要到「发信邮箱」里填真实的 SMTP 服务器。' : ''}` }), h('button', { class: 'btn sm', on: { click: () => go('settings', 'test') } }, '去关闭')));
+  else if (t.sink && t.sink.inUse) box.append(h('div', { class: 'banner' }, h('b', { text: '不会发出任何邮件' }), h('span', { text: '：发信服务器还是本机测试邮箱，而测试模式已关闭。要正式投递，请到「发信邮箱」里填真实的 SMTP 服务器；要继续测试，请重新开启测试模式。' }), h('button', { class: 'btn sm', on: { click: () => go('settings', 'mail') } }, '去设置')));
+  if (t.autoSendOff) box.append(h('div', { class: 'banner' }, h('b', { text: '自动发送已关闭' }), h('span', { text: '：只写信、只列清单，不会发出任何邮件。' }), h('button', { class: 'btn sm', on: { click: () => go('settings', 'rules') } }, '去打开')));
+  return box;
 }
 
 // ---------------------------------------------------------------- shared pieces ----------------------------------
 // ---- pieces of a posting card ----
 const hue = (str) => { let n = 0; for (const c of String(str || '?')) n = (n * 31 + c.codePointAt(0)) % 360; return n; };
 function avatar(j, size) {
-  const name = (j.company || j.title || '?').trim(); const initial = [...name][0].toUpperCase();
+  const name = (j.company || '').trim() || (j.title || '').trim() || '?'; const initial = ([...name][0] || '?').toUpperCase();
   const box = h('div', { class: `avatar${size ? ` ${size}` : ''}`, title: j.company || '' }, h('span', { text: initial }));
   box.style.setProperty('--h', String(hue(name)));
   if (j.hasLogo) { const img = h('img', { alt: '', loading: 'lazy', src: `/api/logo?id=${j.id}` }); img.addEventListener('error', () => img.remove()); box.append(img); }
@@ -104,18 +125,23 @@ function jobRow(j, mode) {
     acts.append(h('button', { class: 'btn', on: { click: (e) => toggleMail(j, e.currentTarget.closest('.jcard')) } }, icon('mail'), '邮件预览'));
   } else if (mode === 'attention') {
     if (apply) acts.append(h('a', { class: 'btn', href: apply, target: '_blank', rel: 'noopener noreferrer' }, '打开岗位', icon('ext')));
-    acts.append(h('button', { class: 'btn', on: { click: () => act(j, 'applied') } }, '我已处理'));
+    acts.append(h('button', { class: 'btn', on: { click: () => act(j, 'applied') } }, j.status === 'failed' ? '不再重试（从这里移除）' : '我已确认，移除'));
   } else if (mode === 'done') {
-    acts.append(h('button', { class: 'btn ghost', on: { click: () => act(j, 'reopen') } }, '放回待投递'));
+    acts.append(h('button', { class: 'btn ghost', on: { click: () => act(j, 'reopen') } }, '撤销（放回原来的状态）'));
+  } else if (mode === 'all') {
+    if (apply) acts.append(h('a', { class: 'btn', href: apply, target: '_blank', rel: 'noopener noreferrer' }, '打开岗位', icon('ext')));
+    if (j.status === 'skipped') acts.append(h('button', { class: 'btn', title: 'AI 评分不够但你想投：放到待投递里', on: { click: () => act(j, 'reopen') } }, '放到待投递'));
   }
+  if (j.hasDraft && (mode === 'todo' || mode === 'all' || mode === 'done')) acts.append(h('button', { class: 'btn', on: { click: (e) => toggleMail(j, e.currentTarget.closest('.jcard')) } }, icon('mail'), '看写好的邮件'));
   if (j.hasDesc || j.summary) acts.append(h('button', { class: 'btn ghost', on: { click: () => showJob(j) } }, '岗位详情'));
 
   const how = h('div', { class: 'how' });
   if (mode === 'todo') {
     how.append(apply ? h('span', {}, icon('ext'), ` 会打开：${where(apply)}`) : h('span', { text: '没有可用的链接' }),
       j.applyUrl ? h('span', { class: 'badge ok', text: '直达申请页' }) : h('span', { class: 'badge', text: '岗位页面（申请入口在页面里）' }),
-      j.to ? h('span', { class: 'badge warn', text: `页面上有邮箱 ${j.to}` }) : null);
+      j.to ? h('span', { class: 'badge warn', text: `邮箱 ${j.to}（见说明）` }) : null);
   } else if (mode === 'sent' || mode === 'attention') {
+    if (mode === 'attention') how.append(h('span', { class: 'badge warn', text: STATUS_LABEL[j.status] || j.status }), h('span', { class: 'hint', text: { failed: j.failedAttempts >= 3 ? `已经重试了 ${j.failedAttempts} 次都没发出去，不会再自动重试：请用「打开岗位」自己投递，或先到「设置 → 发信邮箱」点「验证登录」查原因。` : `确定没有发出去。明天会自动重试（最多 3 次，已试 ${j.failedAttempts || 1} 次）；如果是账号或密码问题，先到「设置 → 发信邮箱」点「验证登录」。`, unknown: '可能已经发出：到你邮箱的「已发送」里确认一下；没有的话用「打开岗位」自己投递。不会自动重发。', sending: '上次发送被打断，不知道有没有发出：同上，请自己确认；不会自动重发。' }[j.status] || '' }));
     how.append(h('span', {}, icon('mail'), j.redirected ? ` 原本要发给 ${j.intendedTo}，实际发到 ${j.to}` : ` 发给 ${j.to || '—'}`),
       j.contactSource ? h('span', { class: 'badge', text: { posting: '邮箱来自岗位正文', page: '邮箱来自岗位网页', search: '邮箱来自网上搜索' }[j.contactSource] || j.contactSource }) : null,
       j.redirected ? h('span', { class: 'badge warn', text: '测试发送' }) : null, h('span', { class: 'badge', text: '附简历 PDF' }));
@@ -137,7 +163,7 @@ function jobRow(j, mode) {
 async function toggleMail(j, card) {
   const old = card.querySelector('.mailprev'); if (old) return old.remove();
   const r = await api('GET', `/api/mail?id=${j.id}`);
-  card.querySelector('.jmain').append(h('div', { class: 'mailprev' }, h('div', { class: 'faint sm', text: '这封邮件的原文（连同你的简历 PDF 一起发出）' }), h('pre', { text: r.ok ? r.text : (r.message || '没有找到邮件原文') })));
+  card.querySelector('.jmain').append(h('div', { class: 'mailprev' }, h('div', { class: 'faint sm', text: r.draft ? '为这个岗位写好的邮件（没有发出；可以复制后自己发）' : '这封邮件的原文（连同你的简历 PDF 一起发出）' }), h('pre', { text: r.ok ? r.text : (r.message || '没有找到邮件原文') })));
 }
 async function showJob(j) {
   const r = await api('GET', `/api/job?id=${j.id}`);
@@ -156,8 +182,9 @@ function statStrip(list, extra) {
 }
 async function act(j, action) {
   const r = await api('POST', '/api/jobs/action', { id: j.id, action }); if (!r.ok) return toast(r.message || '操作失败', true);
-  toast({ reopen: '已放回待投递', applied: '已标记为我已投递', dismissed: '已忽略' }[action], false, action === 'reopen' ? undefined : () => act(j, 'reopen'));
-  go(S.page);
+  const said = { reopen: r.status === 'manual' ? '已放回待投递' : '已撤销，恢复为原来的状态', applied: j.status === 'failed' ? '已移除，不再重试' : ['unknown', 'sending'].includes(j.status) ? '已移除' : '已标记为我已投递', dismissed: '已忽略' }[action];
+  toast(said, false, action === 'reopen' ? undefined : () => act(j, 'reopen'));
+  go(S.page, undefined, { keepScroll: true });
 }
 
 // ---------------------------------------------------------------- home ------------------------------------------
@@ -166,8 +193,9 @@ async function pageHome() {
   const st = S.st; const c = S.jobs.counts; const root = h('div');
   root.append(h('h1', { text: '总览' }), h('p', { class: 'sub', text: '每天自动找职位；能发邮件的直接发，不能的列在「待投递」里，由你点开投递。' }));
   const todoHot = c.todo > 0;
+  if (st.configErrors && st.configErrors.length) root.append(h('div', { class: 'banner' }, h('b', { text: '设置文件有看不懂的行' }), h('span', { text: `：config.local.env 第 ${st.configErrors.join('、')} 行无法识别，已忽略（那一项会被当作没有设置）。在设置页把它重新保存一次即可。` })));
   root.append(h('div', { class: 'grid' },
-    stat(c.todo, '待你投递', () => go('todo'), todoHot), stat(c.sent, '已邮件投递', () => go('sent')), stat(c.attention, '需要留意', () => go('sent')), stat(c.skipped, '评分不够，已跳过', () => go('all'))));
+    stat(c.todo, '待你投递', () => go('todo'), todoHot), stat(c.sent, '已邮件投递', () => go('sent')), stat(c.attention, '需要留意', () => go('sent')), stat(c.skipped, '评分不够，已跳过', () => { S.filter = 'skipped'; go('all'); })));
 
   const card = h('div', { class: 'card' });
   if (!st.ready) {
@@ -181,17 +209,22 @@ async function pageHome() {
       h('div', { class: 'grow' }, h('b', { text: i.label }), i.optional ? h('span', { class: 'badge', text: '可选' }) : null, h('div', { class: 'muted sm', text: i.detail })),
       i.ok ? null : h('button', { class: 'btn', on: { click: () => go(i.page, i.anchor) } }, '去填写')));
   }
-  card.append(h('div', { class: 'row' }, h('span', { class: `check ${st.schedule.installed ? 'ok' : ''}` }, st.schedule.installed ? icon('check') : null), h('div', { class: 'grow' }, h('b', { text: '每天定时运行' }), h('div', { class: 'muted sm', text: st.schedule.installed ? `每天 ${st.schedule.time} 自动运行（Mac 需要醒着或插电）` : '还没安装，请重新运行 install.sh' })), h('button', { class: 'btn', on: { click: () => go('settings', 'schedule') } }, '改时间')));
+  card.append(h('div', { class: 'row' }, h('span', { class: `check ${st.schedule.installed ? 'ok' : ''}` }, st.schedule.installed ? icon('check') : null), h('div', { class: 'grow' }, h('b', { text: '每天定时运行' }), h('div', { class: 'muted sm', text: st.schedule.installed ? `每天 ${st.schedule.time} 自动运行（Mac 需要醒着或插电）` : '还没安装：到「运行时间」里点「保存时间」就会装上' })), h('button', { class: 'btn', on: { click: () => go('settings', 'schedule') } }, st.schedule.installed ? '改时间' : '去安装')));
   root.append(card);
 
   const run = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { text: '运行' }), h('span', { class: 'grow' }),
     h('button', { class: 'btn', id: 'run-dry', on: { click: () => startRun('dry') } }, icon('play'), '试运行（不发邮件）'),
     h('button', { class: 'btn primary', id: 'run-real', on: { click: () => { if (confirm('现在真的运行一次？有邮箱的岗位会直接发出投递邮件。')) startRun('real'); } } }, icon('play'), '立即运行')));
   const lr = st.lastRun;
-  run.append(h('div', { class: 'muted sm', text: lr ? `上次：${fmtTime(lr.ts)} · ${{ ok: '成功', failed: '失败', unconfigured: '未配置' }[lr.result] || lr.result}${lr.result === 'ok' ? `（投递 ${lr.sent}，待你投递 ${lr.listed}）` : lr.message ? `：${lr.message}` : ''}` : '还没运行过' }));
-  run.append(h('pre', { class: 'log', id: 'runlog', hidden: true }));
+  run.append(h('div', { class: 'muted sm', text: lr ? `上次：${fmtTime(lr.ts)} · ${{ ok: '成功', failed: '失败', unconfigured: '未配置' }[lr.result] || lr.result}${lr.result === 'ok' ? `（${lr.testMode ? '测试模式，没有真正发出：' : ''}投递 ${lr.sent}，待你投递 ${lr.listed}${lr.deferred ? `，留到明天 ${lr.deferred}` : ''}）` : lr.message ? `：${lr.message}` : ''}` : '还没运行过' }));
+  const logBox = h('pre', { class: 'log', id: 'runlog', hidden: true }); const repBox = h('div', { id: 'runreport' });
+  run.append(logBox, repBox);
   root.append(run);
   if (st.running) pollRun();
+  else { // the page is not in the document yet: hand the boxes over instead of looking them up
+    const last = await api('GET', '/api/run');
+    if (last.ok !== false && last.lines && last.lines.length) { run.insertBefore(h('div', { class: 'muted sm', text: `${last.mode === 'dry' ? '上次试运行' : '上次手动运行'}的输出（${fmtTime(last.startedAt)}）：` }), logBox); showRunOutput(last.lines, logBox, repBox); }
+  }
 
   if (c.todo) {
     const t = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { text: '最新的待投递' }), h('span', { class: 'grow' }), h('button', { class: 'btn ghost sm', on: { click: () => go('todo') } }, '查看全部')));
@@ -209,52 +242,81 @@ async function startRun(mode) {
 }
 function pollRun() {
   clearInterval(S.runTimer);
+  let sawRun = false; let sawExternal = false; let busy = false;
   const tick = async () => {
-    const r = await api('GET', '/api/run'); const box = $('#runlog');
-    if (box) { box.hidden = false; box.textContent = r.lines.join('\n') || '运行中…'; box.scrollTop = box.scrollHeight; }
-    for (const id of ['run-dry', 'run-real']) { const b = $(`#${id}`); if (b) b.disabled = r.running; }
-    if (!r.running) { clearInterval(S.runTimer); if (r.code !== null && S.page === 'home') { toast(r.code === 0 ? '运行完成' : '运行结束（有提示，见下方）', r.code !== 0); const [st, jobs] = await Promise.all([api('GET', '/api/state'), api('GET', '/api/jobs')]); S.st = st; S.jobs = jobs; renderNav(); } }
+    if (S.page !== 'home') return clearInterval(S.runTimer);
+    if (busy) return; busy = true;
+    const nav = S.nav;
+    try {
+      const r = await api('GET', '/api/run'); const box = $('#runlog');
+      if (S.page !== 'home' || nav !== S.nav) return clearInterval(S.runTimer);             // the user went elsewhere meanwhile
+      if (!r.ok && r.message) { clearInterval(S.runTimer); if (box) { box.hidden = false; box.textContent = r.message; } return; }
+      const lines = r.lines || [];
+      if (box) { box.hidden = false; box.textContent = lines.join('\n') || (r.external ? '定时任务正在运行（这里看不到它的输出，结束后会刷新）…' : '运行中…'); box.scrollTop = box.scrollHeight; }
+      for (const id of ['run-dry', 'run-real']) { const b = $(`#${id}`); if (b) b.disabled = !!r.running; }
+      if (r.running) { sawRun = true; if (r.external) sawExternal = true; return; }
+      clearInterval(S.runTimer);
+      if (!sawRun && r.code === null) return;
+      if (sawExternal) { await go('home', undefined, { keepScroll: true }); return; }          // a launchd run ended: fresh counts, nothing of ours to show
+      if (r.code !== null) toast(r.code === 0 ? '运行完成' : '运行结束（有提示，见下方）', r.code !== 0);
+      await go('home', undefined, { keepScroll: true });                                         // fresh counts, checklist and 上次运行
+      if (lines.length) showRunOutput(lines);
+    } finally { busy = false; }
   };
   S.runTimer = setInterval(tick, 1000); tick();
+}
+// the progress lines go in the log box; the report at the end (Markdown) is rendered like on the 日报 page
+function showRunOutput(lines, box = $('#runlog'), rep = $('#runreport')) {
+  if (!box || !rep) return;
+  let i = lines.length; while (i > 0 && !/^\[hunt\] /.test(lines[i - 1])) i -= 1;   // the report follows the last [hunt] line
+  const log = lines.slice(0, i); const report = lines.slice(i).join('\n').trim();
+  box.hidden = !log.length; box.textContent = log.map((l) => l.replace(/^\[hunt\] /, '')).join('\n'); box.scrollTop = box.scrollHeight;
+  rep.replaceChildren(); if (report) rep.append(/^# /.test(report) ? renderMd(report) : h('pre', { class: 'log', text: report }));
 }
 
 // ---------------------------------------------------------------- job lists --------------------------------------
 async function pageTodo() {
-  const root = h('div', h('h1', { text: '待投递' }), h('p', { class: 'sub', text: '这些岗位没找到可以发邮件的地址。点「前往投递」去岗位页面自己投递，投完点「我已投递」。' }));
+  const root = h('div', {}, h('h1', { text: '待投递' }), h('p', { class: 'sub', text: '这些岗位没找到可以发邮件的地址。点「前往投递」去岗位页面自己投递，投完点「我已投递」。' }));
   const list = S.jobs.jobs.filter((j) => j.group === 'todo'); const card = h('div', { class: 'card' });
-  if (!list.length) card.append(emptyState('现在没有待投递的岗位', '没找到邮箱的岗位会出现在这里，附上投递页面的链接')); else root.append(statStrip(list)); for (const j of list) card.append(jobRow(j, 'todo'));
+  const old = list.filter((j) => Date.now() - Date.parse(j.ts) > 30 * 86400000).length;
+  if (!list.length) card.append(emptyState('现在没有待投递的岗位', '没找到邮箱的岗位会出现在这里，附上投递页面的链接'));
+  else root.append(statStrip(list, old ? h('button', { class: 'btn sm', on: { click: async () => { if (!confirm(`把 30 天前列出的 ${old} 个岗位标记为忽略？（可以在「已处理」里放回来）`)) return; const r = await api('POST', '/api/jobs/dismiss-older', { days: 30 }); if (!r.ok) return toast(r.message || '操作失败', true); toast(`已忽略 ${r.removed} 个`); go('todo'); } } }, `忽略 30 天前的（${old} 个）`) : null));
+  for (const j of list) card.append(jobRow(j, 'todo'));
   root.append(card);
   const done = S.jobs.jobs.filter((j) => j.group === 'done');
   if (done.length) { const d = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { text: '已处理' }), h('span', { class: 'badge', text: String(done.length) }), h('span', { class: 'muted sm', text: '点错了？随时可以放回待投递' }))); for (const j of done) d.append(jobRow(j, 'done')); root.append(d); }
   return root;
 }
 async function pageSent() {
-  const root = h('div', h('h1', { text: '已投递' }), h('p', { class: 'sub', text: '已经用邮件发出的投递，以及需要你留意的发送问题。' }));
+  const root = h('div', {}, h('h1', { text: '已投递' }), h('p', { class: 'sub', text: '已经用邮件发出的投递，以及需要你留意的发送问题。' }));
   const att = S.jobs.jobs.filter((j) => j.group === 'attention');
   if (att.length) { const c = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { text: '需要留意' }), h('span', { class: 'badge warn', text: String(att.length) }))); for (const j of att) c.append(jobRow(j, 'attention')); root.append(c); }
-  const sent = S.jobs.jobs.filter((j) => j.group === 'sent'); const hasTest = S.jobs.jobs.some((j) => j.redirected);
+  const sent = S.jobs.jobs.filter((j) => j.group === 'sent'); const hasTest = S.jobs.jobs.some((j) => j.redirected && j.group !== 'done');   // (what the user already decided about is kept by the server)
   const card = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { text: '已发送' }), h('span', { class: 'badge', text: String(sent.length) }), h('span', { class: 'grow' }),
     hasTest ? h('button', { class: 'btn sm', title: '删除所有测试发送的记录，这些岗位以后可以正式处理', on: { click: async () => { if (!confirm('清除所有"测试发送"的记录？这些岗位以后可以重新正式处理。')) return; const r = await api('POST', '/api/jobs/clear-test'); if (!r.ok) return toast(r.message || '清除失败', true); toast(`已清除 ${r.removed} 个岗位的测试记录`); go('sent'); } } }, '清除测试记录') : null));
-  if (!sent.length) card.append(emptyState('还没有发出过邮件', '岗位正文里写明投递邮箱的，会自动发出，并在这里留底')); else root.insertBefore(statStrip(sent, h('div', {}, h('b', { class: 'num', text: String(sent.filter((j) => j.redirected).length) }), h('span', { text: ' 封是测试发送' }))), root.children[2] || null); for (const j of sent) card.append(jobRow(j, 'sent'));
+  if (!sent.length) card.append(emptyState('还没有发出过邮件', '岗位正文里写明投递邮箱的，会自动发出，并在这里留底')); else root.insertBefore(statStrip(sent, h('div', {}, h('b', { class: 'num', text: String(sent.filter((j) => j.redirected).length) }), h('span', { text: ' 封是测试发送' }))), att.length ? root.children[3] || null : root.children[2] || null); for (const j of sent) card.append(jobRow(j, 'sent'));
   root.append(card); return root;
 }
 async function pageAll() {
-  const root = h('div', h('h1', { text: '全部岗位' }), h('p', { class: 'sub', text: '程序看过的所有岗位和评分，包括被跳过的。' }));
+  const root = h('div', {}, h('h1', { text: '全部岗位' }), h('p', { class: 'sub', text: '程序看过的所有岗位和评分，包括被跳过的。' }));
   const sel = h('select', { on: { change: () => { S.filter = sel.value; fill(); } } }, ...[['all', '全部'], ['todo', '待投递'], ['sent', '已发送'], ['attention', '需留意'], ['done', '已处理'], ['skipped', '不合适']].map(([v, l]) => h('option', { value: v, text: l, ...(S.filter === v ? { selected: true } : {}) })));
-  const card = h('div', { class: 'card' }); const fill = () => { card.replaceChildren(h('div', { class: 'card-head' }, sel)); const l = S.jobs.jobs.filter((j) => S.filter === 'all' || j.group === S.filter); if (!l.length) card.append(h('div', { class: 'empty', text: '没有符合的岗位。' })); for (const j of l.slice(0, 300)) card.append(jobRow(j, j.group === 'done' ? 'done' : 'all')); };
+  const card = h('div', { class: 'card' }); const fill = () => { card.replaceChildren(h('div', { class: 'card-head' }, sel)); const l = S.jobs.jobs.filter((j) => S.filter === 'all' || j.group === S.filter); if (!l.length) card.append(h('div', { class: 'empty', text: '没有符合的岗位。' })); for (const j of l.slice(0, 300)) card.append(jobRow(j, j.group === 'done' ? 'done' : 'all')); if (l.length > 300) card.append(h('div', { class: 'empty', text: `只显示最近 300 个，还有 ${l.length - 300} 个更早的（用上面的筛选缩小范围）` })); };
   fill(); root.append(card); return root;
 }
+// text with http(s) links turned into <a> elements (everything else stays a text node)
+const linkify = (text) => String(text).split(/(https?:\/\/[^\s）)]+)/).map((part, i) => (i % 2 && safeUrl(part) ? h('a', { href: part, target: '_blank', rel: 'noopener noreferrer', text: part }) : part));
 function renderMd(text) {
   const box = h('div', { class: 'md' }); let ul = null;
   for (const line of text.split('\n')) {
-    if (/^- /.test(line) || /^\s+- /.test(line)) { if (!ul) { ul = h('ul'); box.append(ul); } ul.append(h('li', { text: line.replace(/^\s*- (\[ \] )?/, '').replace(/\*\*/g, '') })); continue; }
-    ul = null; if (/^# /.test(line)) box.append(h('h1', { text: line.slice(2) })); else if (/^## /.test(line)) box.append(h('h2', { text: line.slice(3) })); else if (line.trim()) box.append(h('p', { text: line.replace(/\*\*/g, '') }));
+    if (/^- /.test(line) || /^\s+- /.test(line)) { if (!ul) { ul = h('ul'); box.append(ul); } ul.append(h('li', { class: /^\s+- /.test(line) ? 'sub' : undefined }, ...linkify(line.replace(/^\s*- (\[ \] )?/, '').replace(/\*\*/g, '')))); continue; }
+    ul = null; const hd = line.match(/^(#{1,6}) (.*)$/);
+    if (hd) box.append(h(hd[1].length === 1 ? 'h1' : hd[1].length === 2 ? 'h2' : 'h3', { text: hd[2] })); else if (line.trim()) box.append(h('p', {}, ...linkify(line.replace(/\*\*/g, ''))));
   }
   return box;
 }
 async function pageReports() {
-  const root = h('div', h('h1', { text: '日报' }), h('p', { class: 'sub', text: '每天运行后生成的总结。' }));
-  const r = await api('GET', '/api/reports'); const card = h('div', { class: 'card' }); const body = h('div');
+  const root = h('div', {}, h('h1', { text: '日报' }), h('p', { class: 'sub', text: '每天运行后生成的总结。' }));
+  const r = await api('GET', '/api/reports'); if (r.ok === false) throw new Error(r.message || `控制台返回了错误（${r.httpStatus}）`); const card = h('div', { class: 'card' }); const body = h('div');
   if (!r.dates.length) card.append(h('div', { class: 'empty', text: '还没有日报（第一次运行后会出现）。' }));
   else { const sel = h('select', { on: { change: () => load(sel.value) } }, ...r.dates.map((d) => h('option', { value: d, text: d }))); card.append(h('div', { class: 'card-head' }, sel), body); const load = async (d) => { const x = await api('GET', `/api/report?date=${d}`); body.replaceChildren(x.ok ? renderMd(x.text) : h('p', { class: 'muted', text: x.message || '读取失败' })); }; load(r.dates[0]); }
   root.append(card);
@@ -273,10 +335,11 @@ function resultBox() { const el = h('div', { class: 'result', hidden: true }); e
 
 function settingField(f, inputs) {
   const wrap = h('div', { class: `field${f.type === 'urls' ? ' wide' : ''}` }); let input;
-  if (f.type === 'bool') { input = h('input', { type: 'checkbox', checked: f.set ? f.value === 'on' : f.default === 'on' }); wrap.append(h('label', { class: 'check-inline' }, input, h('span', { text: f.label }))); }
-  else if (f.type === 'select') { input = h('select', {}, ...f.options.map((o, i) => h('option', { value: o, text: f.labels[i], ...((f.value || f.default || '') === o ? { selected: true } : {}) }))); wrap.append(h('label', { text: f.label }), input); }
-  else if (f.type === 'urls') { input = h('textarea', { placeholder: f.set ? `已设置（${f.hint}）；留空表示不修改` : '' }); wrap.append(h('label', { text: f.label }), input); }
-  else { input = h('input', { type: f.secret ? 'password' : 'text', autocomplete: 'off', value: f.secret ? '' : (f.value || ''), placeholder: f.secret ? (f.set ? `已设置（${f.hint}）；留空表示不修改` : '') : (f.placeholder || '') }); wrap.append(h('label', { text: f.label }), input); }
+  const id = `f-${f.key}`;
+  if (f.type === 'bool') { input = h('input', { type: 'checkbox', id, checked: f.set ? f.value === 'on' : f.default === 'on' }); wrap.append(h('label', { class: 'check-inline', for: id }, input, h('span', { text: f.label }))); }
+  else if (f.type === 'select') { input = h('select', { id }, ...f.options.map((o, i) => h('option', { value: o, text: f.labels[i], ...((f.value || f.default || '') === o ? { selected: true } : {}) }))); wrap.append(h('label', { text: f.label, for: id }), input); }
+  else if (f.type === 'urls') { input = h('textarea', { id, placeholder: f.set ? `已设置（${f.hint}）；留空表示不修改` : '' }); wrap.append(h('label', { text: f.label, for: id }), input); }
+  else { input = h('input', { id, type: f.secret ? 'password' : 'text', autocomplete: 'off', value: f.secret ? '' : (f.value || ''), placeholder: f.secret ? (f.set ? `已设置（${f.hint}）；留空表示不修改` : '') : (f.placeholder || '') }); wrap.append(h('label', { text: f.label, for: id }), input); }
   if (f.help) wrap.append(h('div', { class: 'help', text: f.help }));
   const err = h('div', { class: 'err' }); wrap.append(err);
   const clear = f.secret && f.set ? h('button', { class: 'btn ghost sm', type: 'button', on: { click: () => { clear.cleared = !clear.cleared; clear.textContent = clear.cleared ? '取消清除' : '清除已保存的值'; } } }, '清除已保存的值') : null;
@@ -296,14 +359,15 @@ async function saveGroup(inputs, keys) {
 }
 async function pageSettings() {
   const [pr, se] = await Promise.all([api('GET', '/api/profile'), api('GET', '/api/settings')]);
+  const bad = [pr, se].find((r) => r && r.ok === false); if (bad) throw new Error(bad.message || `控制台返回了错误（${bad.httpStatus}）`);
   S.profile = pr.profile; S.settings = se; const inputs = {}; const root = h('div');
   root.append(h('h1', { text: '设置' }), h('p', { class: 'sub', text: '填好之后，每天早上自动开始找职位。密钥只保存在这台电脑上，页面不会再显示它们。' }));
 
   // 1 profile
   const pin = {}; const pform = h('div', { class: 'form' }); const miss = h('div', { class: 'note' });
   for (const [k, label, type, req, wide, ph] of PROFILE_FIELDS) {
-    const el = type === 'area' ? h('textarea', { placeholder: ph || '' }) : h('input', { type: 'text', placeholder: ph || '' }); el.value = S.profile[k] || ''; pin[k] = el;
-    pform.append(h('div', { class: `field${wide ? ' wide' : ''}` }, h('label', {}, label, req ? h('span', { class: 'faint', text: ' *' }) : null), el));
+    const el = type === 'area' ? h('textarea', { id: `p-${k}`, placeholder: ph || '' }) : h('input', { id: `p-${k}`, type: 'text', placeholder: ph || '' }); el.value = S.profile[k] || ''; pin[k] = el;
+    pform.append(h('div', { class: `field${wide ? ' wide' : ''}` }, h('label', { for: `p-${k}` }, label, req ? h('span', { class: 'faint', text: ' *' }) : null), el));
   }
   const showMiss = (m) => { miss.textContent = m.length ? `还差：${m.map((x) => `${x.label}（${x.message}）`).join('、')}` : ''; };
   showMiss(pr.missing);
@@ -328,24 +392,31 @@ async function pageSettings() {
 
   const mail = groupCard('mail', 'mail', '发信邮箱和简历', '岗位里能找到邮箱时，用它直接投递', [['smtp', '验证登录（不发邮件）'], ['mail', '给自己发一封测试邮件', '会真的发一封测试邮件到你自己的邮箱，确认吗？']]);
   const up = h('input', { type: 'file', accept: 'application/pdf,.pdf', hidden: true }); const cur = h('span', { class: 'muted sm', text: se.resume.set ? `当前：${se.resume.name}${se.resume.exists ? '' : '（文件找不到了）'}` : '还没有上传' });
-  up.addEventListener('change', async () => { const f = up.files[0]; if (!f) return; const r = await api('POST', '/api/resume', undefined, await f.arrayBuffer()); if (!r.ok) return toast(r.message || '上传失败', true); cur.textContent = `当前：${r.name}`; toast('简历已上传'); });
+  up.addEventListener('change', async () => { const f = up.files[0]; up.value = ''; if (!f) return; if (f.size > 8 * 1024 * 1024) return toast('文件超过 8 MB，请压缩后再上传', true); const r = await api('POST', '/api/resume', undefined, await f.arrayBuffer()); if (!r.ok) return toast(r.message || '上传失败', true); cur.textContent = `当前：${r.name}`; toast('简历已上传'); });
   mail.append(h('div', { class: 'row' }, h('div', { class: 'grow' }, h('b', { text: '简历 PDF' }), h('div', { class: 'muted sm', text: '随每封投递邮件作为附件发出（不超过 8 MB）' }), cur), h('button', { class: 'btn', on: { click: () => up.click() } }, '选择 PDF…'), up));
   root.append(mail);
   root.append(groupCard('rules', 'rules', '投递规则', '默认值比较保守，可以按需要调整'));
   const tm = groupCard('test', 'test', '测试模式', '先试试发邮件，又不想真的打扰招聘方');
   const sk = S.st.test.sink; const usingSink = (se.fields.find((f) => f.key === 'SMTP_HOST') || {}).value === '127.0.0.1' && String((se.fields.find((f) => f.key === 'SMTP_PORT') || {}).value) === String(sk.port);
   tm.append(h('div', { class: 'row' }, h('div', { class: 'grow' }, h('b', { text: '本机测试邮箱' }), h('div', { class: 'muted sm', text: `127.0.0.1:${sk.port}，控制台开着时可用，已收到 ${sk.count} 封。发到这里的邮件不会离开这台电脑，用来在没有真实邮箱账号时测试发信。${usingSink ? '（当前正在使用）' : ''}` })),
-    h('button', { class: 'btn', on: { click: async () => { const r = await api('POST', '/api/sink/use'); if (!r.ok) return toast('设置失败', true); toast('已把发信服务器设为本机测试邮箱'); go('settings', 'mail'); } } }, usingSink ? '重新套用' : '使用本机测试邮箱')));
+    h('button', { class: 'btn', on: { click: async () => { const r = await api('POST', '/api/sink/use'); if (!r.ok) return toast('设置失败', true); toast(`已把发信服务器设为本机测试邮箱，并开启测试模式（收件人改为 ${r.redirect}）`); go('settings', 'mail'); } } }, usingSink ? '重新套用' : '使用本机测试邮箱')));
   root.append(tm);
-  root.append(groupCard('notify', 'notify', '通知', '每天的日报之外，是否也发到 Discord'));
+  root.append(groupCard('notify', 'notify', '通知', '每天的日报之外，是否也发到 Discord', [['discord', '发一条测试消息']]));
 
   // schedule
-  const t = h('input', { type: 'time', value: S.st.schedule.time }); const res = resultBox();
-  root.append(card('schedule', '运行时间', '每天自动运行', h('div', { class: 'field' }, h('label', { text: '每天几点' }), t, h('div', { class: 'help', text: '到点后 20、40、90 分钟还会各检查一次：当天已经做完就什么都不做，只有失败（例如刚唤醒还没联网）才会重试。Mac 需要醒着或接着电源。' })),
-    h('div', { class: 'actions' }, h('button', { class: 'btn primary', on: { click: async () => { const r = await api('POST', '/api/schedule', { time: t.value }); res.show(!!r.ok, r.ok ? `已设置：每天 ${t.value}` : r.message); } } }, '保存时间'), res)));
+  const t = h('input', { type: 'time', id: 'hunt-time', value: S.st.schedule.time }); const res = resultBox();
+  root.append(card('schedule', '运行时间', '每天自动运行', h('div', { class: 'field' }, h('label', { text: '每天几点', for: 'hunt-time' }), t, h('div', { class: 'help', text: `${S.st.schedule.retries && S.st.schedule.retries.length ? `到点后还会在 ${S.st.schedule.retries.join('、')} 各检查一次` : '太接近午夜，没有补跑时段'}：当天已经做完就什么都不做，只有失败（例如刚唤醒还没联网）才会重试；跨过午夜的补跑时段不安排。Mac 需要醒着或接着电源。` })),
+    h('div', { class: 'actions' }, h('button', { class: 'btn primary', on: { click: async () => { const r = await api('POST', '/api/schedule', { time: t.value }); res.show(!!r.ok, r.ok ? `已设置：每天 ${t.value}${r.schedule && r.schedule.retries && r.schedule.retries.length ? `（补跑：${r.schedule.retries.join('、')}）` : '（太接近午夜，没有补跑时段）'}` : r.message); } } }, '保存时间'), res)));
   return root;
 }
 
 // ---------------------------------------------------------------- boot ------------------------------------------
-setInterval(() => { const c = $('#clock'); if (S.st && S.st.schedule) c.textContent = S.st.ready ? `下次运行 ${countdown(S.st.schedule.next)}` : '尚未就绪'; }, 30000);
+function tickClock() {
+  const c = $('#clock'); const sch = S.st && S.st.schedule; if (!sch) return;
+  if (!S.st.ready) c.textContent = '尚未就绪';
+  else if (!sch.installed) c.textContent = '定时任务未安装';
+  else if (new Date(sch.next) - Date.now() <= 0) { c.textContent = '正在运行或刚运行过'; api('GET', '/api/state').then((st) => { if (st && st.schedule) { S.st = st; renderNav(); } }); }
+  else c.textContent = `下次运行 ${countdown(sch.next)}`;
+}
+setInterval(tickClock, 30000);
 go('home');

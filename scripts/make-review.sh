@@ -6,6 +6,9 @@
 set -euo pipefail
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$SRC/../../notes/n8n-job-hunter-review}"; mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
+# rsync --delete below empties OUT of everything else: only an empty folder or an existing review folder is acceptable
+case "$OUT" in "$HOME"|"$HOME/"|/|"$SRC"|"$SRC"/*) echo "OUTDIR 不能是 home、根目录或项目本身：$OUT" >&2; exit 1 ;; esac
+if [ -n "$(ls -A "$OUT")" ] && [ ! -f "$OUT/REVIEW.md" ] && [ ! -f "$OUT/FILES.txt" ]; then echo "OUTDIR 非空而且不是评审目录（没有 REVIEW.md / FILES.txt），拒绝覆盖：$OUT" >&2; exit 1; fi
 export PATH="$HOME/.n8n-job-hunter/.runtime/node/bin:$PATH"; command -v node >/dev/null || export PATH="$HOME/.n8n-morning-brief/.runtime/node/bin:$PATH"
 bash "$SRC/scripts/make-package.sh" --no-zip >/dev/null
 STAGE="$SRC/dist/stage/n8n-job-hunter"

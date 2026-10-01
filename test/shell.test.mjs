@@ -42,3 +42,33 @@ test('workflow stage code only uses what the n8n Code-node sandbox provides (no 
     assert.equal(m, null, `${path.relative(root, f)} uses ${m && m[0]}, which is not available in n8n's sandbox`);
   }
 });
+
+test('install.sh reads the previously chosen run time back from the settings file (the line schedule.sh writes)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'jh-time-'));
+  fs.writeFileSync(path.join(home, 'config.local.env'), "AI_MODEL='m'\nHUNT_TIME='09:30'\n");
+  const lines = fs.readFileSync(path.join(root, 'install.sh'), 'utf8').split('\n'); const at = lines.findIndex((l) => l.includes('sed -n "s/^HUNT_TIME='));
+  assert.ok(at > 0, 'the extraction line exists'); const snippet = lines.slice(at, at + 2).join('\n');   // the lookup and the 08:00 default
+  // under the installer's own options (set -euo pipefail): a saved time is kept, no file (a fresh install!) and no entry both give 08:00
+  const run = (dir, time) => { const r = spawnSync('bash', ['-euo', 'pipefail', '-c', `HOME_DIR=${JSON.stringify(dir)}; TIME=${JSON.stringify(time)}\n${snippet}\necho "$TIME"`], { encoding: 'utf8' }); return [r.status, r.stdout.trim()]; };
+  assert.deepEqual(run(home, ''), [0, '09:30']);
+  assert.deepEqual(run(path.join(home, 'nope'), ''), [0, '08:00'], 'a fresh install has no settings file yet');
+  assert.deepEqual(run(home, '07:00'), [0, '07:00'], 'an explicit argument wins');
+  fs.writeFileSync(path.join(home, 'config.local.env'), "AI_MODEL='m'\n");
+  assert.deepEqual(run(home, ''), [0, '08:00']);
+  for (const form of ['HUNT_TIME="21:15"', 'HUNT_TIME=21:15']) { fs.writeFileSync(path.join(home, 'config.local.env'), `AI_MODEL='m'\n${form}\n`); assert.deepEqual(run(home, ''), [0, '21:15'], form); }   // every form the loader accepts
+  fs.writeFileSync(path.join(home, 'config.local.env'), "AI_MODEL='m'\nHUNT_TIME='09:30'\n");
+  // what schedule.sh writes keeps every other line and the file private
+  const cfg = path.join(home, 'config.local.env');
+  const write = fs.readFileSync(path.join(root, 'scripts/schedule.sh'), 'utf8').split('\n').filter((l) => /CFG=|CFG\.new/.test(l)).join('\n');
+  const s = spawnSync('bash', ['-euo', 'pipefail', '-c', `umask 077; HOME_DIR=${JSON.stringify(home)}; TIME=07:15\n${write}`], { encoding: 'utf8' });
+  assert.equal(s.status, 0, s.stderr);
+  assert.equal(fs.readFileSync(cfg, 'utf8'), "AI_MODEL='m'\nHUNT_TIME='07:15'\n"); assert.equal(fs.statSync(cfg).mode & 0o777, 0o600);
+});
+
+test('the console page never builds HTML from strings (third-party text is only ever text)', () => {
+  for (const f of ['scripts/console/app.js', 'scripts/console/index.html']) {
+    const code = fs.readFileSync(path.join(root, f), 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    const m = code.match(/\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML|document\.write|createContextualFragment|\bon[a-z]+\s*=\s*["']/);
+    assert.equal(m, null, `${f} uses ${m && m[0]}`);
+  }
+});

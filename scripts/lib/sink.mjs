@@ -8,12 +8,14 @@ import path from 'node:path';
 export function startSink({ dir, port = 5725 }) {
   fs.mkdirSync(dir, { recursive: true });
   const server = net.createServer((sock) => {
-    let data = false; let buf = ''; let raw = ''; let rcpt = [];
+    let data = false; let buf = ''; let raw = ''; let rcpt = []; let authStep = 0; let greeted = false;
+    const MAX_MAIL = 25 * 1024 * 1024;
     sock.write('220 job-hunter test mailbox\r\n');
     sock.on('data', (chunk) => {
       buf += chunk.toString('latin1');
       for (;;) {
         if (data) {
+          if (raw.length + buf.length > MAX_MAIL) { sock.destroy(); return; }                      // bounded: no page can fill the disk or memory through it
           const end = buf.indexOf('\r\n.\r\n');
           if (end < 0) { const keep = Math.max(0, buf.length - 4); raw += buf.slice(0, keep); buf = buf.slice(keep); return; } // the terminator can be split across chunks
           raw += buf.slice(0, end); buf = buf.slice(end + 5); data = false;
@@ -23,7 +25,12 @@ export function startSink({ dir, port = 5725 }) {
         }
         const nl = buf.indexOf('\r\n'); if (nl < 0) return;
         const line = buf.slice(0, nl); buf = buf.slice(nl + 2); const u = line.toUpperCase();
-        if (u.startsWith('EHLO') || u.startsWith('HELO')) sock.write('250-test mailbox\r\n250 8BITMIME\r\n');
+        // Only SMTP clients, which greet first. A browser page can reach 127.0.0.1:5725 with fetch(): its request line is
+        // not a greeting, so the connection is closed before anything could be stored.
+        if (!greeted) { if (/^(EHLO|HELO) [^\s\/]+$/i.test(line.trim())) greeted = true; else { sock.end('554 not an SMTP client\r\n'); return; } }   // "EHLO / HTTP/1.1" (fetch with a custom method) is not a greeting
+        if (u.startsWith('EHLO') || u.startsWith('HELO')) sock.write('250-test mailbox\r\n250-AUTH PLAIN LOGIN\r\n250 8BITMIME\r\n');
+        else if (authStep) { authStep -= 1; sock.write(authStep ? '334 UGFzc3dvcmQ6\r\n' : '235 ok\r\n'); }   // AUTH LOGIN: any user name, any password
+        else if (u === 'AUTH LOGIN') { authStep = 2; sock.write('334 VXNlcm5hbWU6\r\n'); }
         else if (u.startsWith('RCPT TO')) { const m = line.match(/<([^>]*)>/); if (m) rcpt.push(m[1]); sock.write('250 ok\r\n'); }
         else if (u === 'DATA') { data = true; sock.write('354 go\r\n'); }
         else if (u === 'QUIT') { sock.write('221 bye\r\n'); sock.end(); return; }

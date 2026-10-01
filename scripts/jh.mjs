@@ -13,6 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { homeDir, loadConfig, setConfig, KEYS, SECRET } from './lib/config.mjs';
 import { resolveSettings, preflight, Store, runHunt } from './hunt.mjs';
+import { validate, FIELDS } from './console.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const [cmd, ...rest] = process.argv.slice(2);
@@ -32,7 +33,7 @@ if (cmd === 'console') {
   process.exit(r.status ?? 0);
 } else if (cmd === 'run') {
   const r = await runHunt({ args: rest, log: (m) => process.stderr.write(`[hunt] ${m}\n`) });
-  process.stdout.write(`${r.report || r.message || ''}\n`);
+  if (!rest.includes('--scheduled') || rest.includes('--dry-run')) process.stdout.write(`${r.report || r.message || ''}\n`); // launchd runs stay quiet; the report file is the record
   process.exit(r.code);
 } else if (cmd === 'config' && rest[0] === 'show') {
   const c = loadConfig(home);
@@ -42,8 +43,19 @@ if (cmd === 'console') {
 } else if (cmd === 'config' && rest[0] === 'set' && rest[1]) {
   let v = rest[2];
   if (v === undefined) v = SECRET.test(rest[1]) ? await hidden(`${rest[1]}（输入时不显示）: `) : await new Promise((r) => { const rl = readline.createInterface({ input: process.stdin, output: process.stdout }); rl.question(`${rest[1]}: `, (a) => { rl.close(); r(a); }); });
-  setConfig(home, rest[1], v.trim());
-  console.log(`${rest[1]} 已保存`);
+  if (rest[1] === 'HUNT_TIME') {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v.trim())) { console.error('HUNT_TIME 的格式应为 HH:MM（24 小时制），例如 08:00；它就是定时任务的时间，不能清空'); process.exit(1); }
+    // the time lives in the launchd job: (re)install it; schedule.sh records HUNT_TIME once that worked, so status never shows a time that is not installed
+    const r = spawnSync('bash', [path.join(here, 'schedule.sh'), v.trim()], { stdio: 'inherit', env: { ...process.env, JOBHUNT_HOME: home } });
+    process.exit(r.status ?? 1);
+  }
+  // the same checks as the console's settings page (a value the run would silently ignore is refused here)
+  let val = v.trim();
+  if (FIELDS.some((f) => f.key === rest[1])) { const [ok, err] = validate(rest[1], val); if (err) { console.error(`${rest[1]}：${err}`); process.exit(1); } val = ok; }
+  else if (rest[1] === 'AI_JSON_MODE') val = val === '' ? '' : (/^(on|1|true|yes)$/i.test(val) ? 'on' : 'off');
+  else if (['AI_DELAY_MS', 'MAIL_MAX_CHARS'].includes(rest[1]) && val && !/^\d+$/.test(val)) { console.error(`${rest[1]}：应为整数`); process.exit(1); }
+  setConfig(home, rest[1], val);
+  console.log(val === '' ? `${rest[1]} 已清除` : `${rest[1]} 已保存`);
 } else if (cmd === 'status') {
   const st = resolveSettings(); const store = new Store(home, { dryRun: true });
   const pf = preflight(st);
@@ -53,7 +65,7 @@ if (cmd === 'console') {
   const byId = new Map(); for (const e of store.events()) byId.set(e.id, { ...(byId.get(e.id) || {}), ...e });   // one row per posting: its latest status
   const ev = [...byId.values()];
   const count = (s) => ev.filter((e) => e.status === s).length;
-  console.log(`累计：已投递 ${count('sent')} · 待你投递 ${count('manual')} · 结果不确定 ${count('unknown')} · 跳过 ${count('skipped')}`);
+  console.log(`累计：已邮件投递 ${count('sent')} · 你已自己投递 ${count('applied')} · 待你投递 ${count('manual')} · 结果不确定 ${count('unknown') + count('sending')} · 发送失败待重试 ${count('failed')} · 已忽略 ${count('dismissed')} · 跳过 ${count('skipped')}`);
   const reports = fs.existsSync(store.reports) ? fs.readdirSync(store.reports).filter((f) => f.endsWith('.md')).sort() : [];
   console.log(`最近一次日报：${reports.length ? reports[reports.length - 1].replace('.md', '') : '还没有'}`);
   const lc = spawnSync('launchctl', ['list'], { encoding: 'utf8' }).stdout || '';
@@ -68,6 +80,7 @@ if (cmd === 'console') {
   const todo = [...last.values()].filter((e) => e.status === 'manual');
   console.log(todo.length ? todo.map((e) => `- ${e.company ? `${e.company} · ` : ''}${e.title}（${e.score} 分）${e.url}`).join('\n') : '没有待投递的岗位');
 } else {
-  console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 9).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+  const lines = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1); // the comment block at the top is the usage text
+  console.log(lines.slice(0, lines.findIndex((l) => !l.startsWith('//'))).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
   process.exit(cmd ? 1 : 0);
 }
