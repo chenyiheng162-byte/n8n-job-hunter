@@ -31,7 +31,8 @@ export async function startFakeWorld({ jobs, aiDown = false, feeds = {}, aiReply
       const send = (code, obj, type = 'application/json') => { res.writeHead(code, { 'Content-Type': type }); res.end(typeof obj === 'string' ? obj : JSON.stringify(obj)); };
       if (req.url.startsWith('/jooble-echo/')) return send(400, { error: `bad key ${decodeURIComponent(req.url.slice(13))}` });   // an upstream that echoes the secret in its error
       if (req.url.startsWith('/jooble/')) { log.jooble += 1; try { log.joobleBodies.push(JSON.parse(body)); } catch (e) { /* none */ } return send(200, { jobs: jobs.map((j) => ({ title: j.title, company: j.company, location: 'Shanghai', snippet: j.snippet, link: typeof j.link === 'function' ? j.link(log.jooble) : j.link || `${base}/job/${encodeURIComponent(j.title)}`, updated: new Date().toISOString(), salary: j.salary || '', type: j.type || '' })) }); }
-      if (req.url.startsWith('/remotive')) { log.remotive.push(req.url); return send(200, { jobs: jobs.map((j) => ({ title: j.title, company_name: j.company, candidate_required_location: 'Worldwide', description: j.snippet, url: `${base}/job/${encodeURIComponent(j.title)}`, publication_date: new Date().toISOString(), job_type: 'full_time', tags: ['sql'] })) }); }
+      // (Remotive postings get their own /rjob/ links, unlike Jooble's /job/ ones)
+      if (req.url.startsWith('/remotive')) { log.remotive.push(req.url); return send(200, { jobs: jobs.map((j) => ({ title: j.title, company_name: j.company, candidate_required_location: 'Worldwide', description: j.snippet, url: `${base}/rjob/${encodeURIComponent(j.title)}`, publication_date: new Date().toISOString(), job_type: 'full_time', tags: ['sql'] })) }); }
       if (req.url === '/ai/models') return send(200, { data: [{ id: 'm' }, { id: 'other-model' }] });
       if (req.url === '/ai/chat/completions') {
         if (aiDown) return send(500, { error: 'down' });

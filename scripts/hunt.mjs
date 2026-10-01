@@ -37,10 +37,10 @@ const redact = (s, secrets = []) => {
 // ------------------------------------------------------------------ settings
 export const isLocalHost = (h) => /^(127\.0\.0\.1|localhost|::1)$/i.test(String(h || ''));
 // the console's local test mailbox: mail "sent" there is a file on this computer, so it is only ever a test
-export const usesSink = (s) => isLocalHost(s.SMTP_HOST) && Number(s.SMTP_PORT || 465) === SINK_PORT;
+export const usesSink = (s) => isLocalHost(s.SMTP_HOST) && Number(s.SMTP_PORT || 465) === Number(s.JOBHUNT_SINK_PORT || SINK_PORT); // (JOBHUNT_SINK_PORT: tests)
 export const sinkWithoutTestMode = (s) => usesSink(s) && !s.MAIL_REDIRECT_TO;
 // the From address: SMTP_FROM, else the login, else (only for the local test mailbox) a placeholder that is never persisted
-export const fromAddress = (s) => s.SMTP_FROM || s.SMTP_USER || (isLocalHost(s.SMTP_HOST) ? 'job-hunter@localhost.test' : '');
+export const fromAddress = (s) => s.SMTP_FROM || s.SMTP_USER || (usesSink(s) ? 'job-hunter@localhost.test' : ''); // (a local relay on another port is a real server: it needs a real sender)
 export function resolveSettings(env = process.env) {
   const home = homeDir(env);
   const cfg = loadConfig(home);
@@ -111,6 +111,7 @@ export class Store {
 // "unknown" = it may have left (timeout, broken connection mid-way): never sent again automatically.
 const CERTAINLY_NOT_SENT_CODE = /^(EAUTH|EENVELOPE)$/;                       // login refused / every recipient refused
 const CERTAINLY_NOT_SENT_MSG = /\b(ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)\b/; // never connected
+const certainlyNotSent = (e) => { const code = String((e && (e.code || (e.cause && e.cause.code))) || ''); const msg = String((e && e.message) || ''); return CERTAINLY_NOT_SENT_CODE.test(code) || CERTAINLY_NOT_SENT_MSG.test(msg) || code === 'ETLS' || (e && e.command === 'STARTTLS') || /STARTTLS|initiating TLS/i.test(msg); }; // (ETLS: STARTTLS refused or failed, which happens before anything is sent)
 // ("Connection closed unexpectedly" and timeouts are NOT in these lists: they can happen after the body went out.)
 // nodemailer ships with n8n: find it in the runtime folder that provides n8n (see lib/runtime.mjs)
 export const loadNodemailer = runtimeLoadNodemailer;
@@ -131,7 +132,7 @@ export function makeMailer(s, req) {
   return async (mail) => {
     try { const r = await transport.sendMail(mail); return { status: 'sent', messageId: r.messageId }; } catch (e) {
       const code = String((e && (e.code || (e.cause && e.cause.code))) || '');
-      return { status: CERTAINLY_NOT_SENT_CODE.test(code) || CERTAINLY_NOT_SENT_MSG.test(String((e && e.message) || '')) ? 'failed' : 'unknown', reason: `${code || 'error'} ${redact(e && e.message).slice(0, 160)}` };
+      return { status: certainlyNotSent(e) ? 'failed' : 'unknown', reason: `${code || 'error'} ${redact(e && e.message).slice(0, 160)}` };
     }
   };
 }

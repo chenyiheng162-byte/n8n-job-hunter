@@ -43,6 +43,7 @@ const jobIdOf = (url, title = '', company = '') => { const u = canonicalUrl(url)
 // Events written by the sender (hunt.mjs) carry `to`; the console's bookkeeping events (applied / dismissed / an undo that
 // restores an earlier status) never do, and must not look like a send attempt or forget a recipient.
 const SEND_STATUS = ['sending', 'sent', 'unknown', 'failed'];
+const KEY_WINDOW_MS = Number(E('JOB_MAX_AGE_DAYS', '30')) * 86400000; // how far back "same title and company" counts as the same vacancy
 const isSendEvent = (ev) => SEND_STATUS.includes(ev.status) && ev.to !== undefined;
 function loadState() {
   const jobs = new Map(); const recipients = new Map(); const keys = new Map();
@@ -56,7 +57,7 @@ function loadState() {
     if (ev.status === 'failed' && isSendEvent(ev)) cur.attempts += 1;
     cur.status = ev.status; cur.ts = ev.ts; if (ev.score !== undefined) cur.score = ev.score;
     if (isSendEvent(ev)) { cur.send = ev.status; cur.sendTs = ev.ts; cur.to = String(ev.to || '').toLowerCase(); cur.redirected = !!ev.redirected; }
-    if (ev.title && ev.company) { const k = `${String(ev.title).toLowerCase()}|${String(ev.company).toLowerCase()}`; if (!keys.has(k)) keys.set(k, new Set()); keys.get(k).add(ev.id); }
+    if (ev.title && ev.company && Date.now() - Date.parse(ev.ts) < KEY_WINDOW_MS) { const k = `${String(ev.title).toLowerCase()}|${String(ev.company).toLowerCase()}`; if (!keys.has(k)) keys.set(k, new Set()); keys.get(k).add(ev.id); } // (a company re-posting the same role months later is a new vacancy)
     jobs.set(ev.id, cur);
   }
   // Addresses really written to, decided by the LAST send status of each posting: a send that certainly failed reached nobody

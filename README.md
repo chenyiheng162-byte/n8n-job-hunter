@@ -62,7 +62,7 @@ curl -fsSL https://raw.githubusercontent.com/chenyiheng162-byte/n8n-job-hunter/m
 
 | 规则 | 说明 |
 |---|---|
-| 每日上限 | `MAX_APPLICATIONS_PER_DAY`（默认 10）封，超出的留到明天 |
+| 每日上限 | `MAX_APPLICATIONS_PER_DAY`（默认 10）封，超出的留到明天；设为 0 = 暂停自动发送（岗位只列出一次，写好的信在 `drafts/`） |
 | 评分门槛 | `MIN_SCORE`（默认 7）；提示词要求命中"不接受"条件的岗位最高 3 分（靠 AI 遵守，不是硬保证） |
 | 收件人由代码选，不由 AI 选 | 邮箱用正则从岗位正文里提取，排除 noreply、岗位网站自己的域名等；岗位文字里的"指令"一律不执行；可选的"网上搜 HR 邮箱"只用职位来源给出的公司名，不用 AI 补的 |
 | 网页上抓到的邮箱不自动用 | 招聘页上常常是公司通用邮箱，默认只当提示；要用请在设置里打开「也使用岗位网页里找到的邮箱」 |
@@ -83,7 +83,7 @@ curl -fsSL https://raw.githubusercontent.com/chenyiheng162-byte/n8n-job-hunter/m
 ~/.n8n-job-hunter/scripts/jobhunt config set HUNT_TIME 09:30   # 改运行时间（同时重装定时任务）
 ```
 
-数据都在 `~/.n8n-job-hunter/data/`：`applications.jsonl`（所有记录）、`reports/`、`sent/`（发出去的邮件原文）、`to-apply.csv`（待投递清单，Excel 可直接打开；每次运行后按当前状态整体重写，你在控制台点的「我已投递」「忽略」也会反映在状态列里）。同一时刻只有一次运行（试运行也算）：运行锁是 `~/.n8n-job-hunter/run.lockf`，由系统自动释放。移除：`bash ~/n8n-job-hunter/uninstall.sh`（加 `--purge` 连资料和记录一起删）。
+数据都在 `~/.n8n-job-hunter/data/`：`applications.jsonl`（所有记录）、`reports/`、`sent/`（发出去的邮件原文）、`drafts/`（只列出、没发出的岗位写好的信，控制台里也能看）、`to-apply.csv`（待投递清单，Excel 可直接打开；每次运行后按当前状态整体重写，你在控制台点的「我已投递」「忽略」也会反映在状态列里）。同一时刻只有一次运行（试运行也算）：运行锁是 `~/.n8n-job-hunter/run.lockf`，由系统自动释放。移除：`bash ~/n8n-job-hunter/uninstall.sh`（加 `--purge` 连资料和记录一起删）。
 
 ## 目录
 

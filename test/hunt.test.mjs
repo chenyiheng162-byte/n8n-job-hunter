@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { runHunt, preflight, resolveSettings, Store } from '../scripts/hunt.mjs';
+import { runHunt, preflight, resolveSettings, Store, makeMailer } from '../scripts/hunt.mjs';
 import { acquireLock } from '../scripts/lib/lock.mjs';
 import http from 'node:http';
 import { makeHttp, MAX_BODY } from '../scripts/engine.mjs';
@@ -362,11 +362,11 @@ test('one failing source next to a source that answered with nothing is "no new 
 
 test('placeholder check: blanks are caught, ordinary brackets and comparisons are not', { skip }, async () => {
   const mk = (n, body) => ({ title: `D${n} 分析`, company: `Co${n}`, snippet: `[score:9] [body:${body}] hr${n}@co${n}.com` });
-  const t = await setup({}, [mk(1, '【求职申请】应聘数据分析实习生：我有 <2 years 经验，详见附件（请查收）。' + '补充说明。'.repeat(12)), mk(2, '您好，我是[姓名]，应聘贵公司岗位。' + '内容'.repeat(40)), mk(3, 'Dear Hiring Manager, I am applying for the [Position] role at your company. ' + 'More text here. '.repeat(6))]);
+  const t = await setup({}, [mk(1, '【求职申请】应聘数据分析实习生：我有 <2 years 经验，详见附件（请查收）。' + '补充说明。'.repeat(12)), mk(2, '您好，我是[姓名]，应聘贵公司岗位。' + '内容'.repeat(40)), mk(3, 'Dear Hiring Manager, I am applying for the [Position] role at your company. ' + 'More text here. '.repeat(6)), mk(4, '【应聘贵公司数据分析师岗位】李明：您好，我对这个职位很感兴趣。' + '补充说明。'.repeat(12)), mk(5, '【XX公司】您好，请填写（此处填写姓名）。' + '补充说明。'.repeat(12))]);
   try {
     const r = await run(t.home, t.world, t.smtp);
-    assert.deepEqual(r.acted.sent.map((i) => i.title[1]), ['1']);
-    assert.deepEqual(r.acted.listed.map((i) => i.title[1]).sort(), ['2', '3']);
+    assert.deepEqual(r.acted.sent.map((i) => i.title[1]).sort(), ['1', '4']);
+    assert.deepEqual(r.acted.listed.map((i) => i.title[1]).sort(), ['2', '3', '5']);
     assert.match(r.acted.listed[0].note, /投递邮箱：hr/);                                      // the address is still shown to the user
   } finally { await t.done(); }
 });
@@ -535,6 +535,11 @@ test('the same vacancy from another board (another link, same title and company)
     // tomorrow Remotive lists the same vacancy under its own link
     const again = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '', REMOTIVE: 'on', REMOTIVE_API_BASE: `${t.world.base}/remotive` }, ['--direct', '--force']);
     assert.equal(again.plan.fetched, 1); assert.equal(again.plan.items.length, 0);
+    // ... but a company re-posting the same role after the look-back window is a new vacancy
+    const f = path.join(t.home, 'data', 'applications.jsonl'); const old = new Date(Date.now() - 45 * 86400000).toISOString();
+    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.stringify({ ...JSON.parse(l), ts: old })).join('\n') + '\n');
+    const later = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '', REMOTIVE: 'on', REMOTIVE_API_BASE: `${t.world.base}/remotive` }, ['--direct', '--force']);
+    assert.equal(later.plan.items.length, 1, 'seen again after 45 days (JOB_MAX_AGE_DAYS 30)');
   } finally { await t.done(); }
 });
 
@@ -550,7 +555,7 @@ test('the local test mailbox without test mode sends nothing: postings are liste
     assert.equal(events(t.home).find((e) => e.id === a.id && e.status === 'manual').draft, true);
     // with test mode on, the same setup is a working test setup (nodemailer talks to the fake server standing in for the sink)
     const t2 = await setup();
-    try { const ok = await run(t2.home, t2.world, t2.smtp, { SMTP_FROM: '', SMTP_USER: '', MAIL_REDIRECT_TO: 'me@example.net' }); assert.equal(ok.acted.sent.length, 1); assert.match(t2.smtp.mails[0].raw, /From: .*job-hunter@localhost\.test/); } finally { await t2.done(); }
+    try { const ok = await run(t2.home, t2.world, t2.smtp, { SMTP_FROM: '', SMTP_USER: '', MAIL_REDIRECT_TO: 'me@example.net', JOBHUNT_SINK_PORT: String(t2.smtp.port) }); assert.equal(ok.acted.sent.length, 1); assert.match(t2.smtp.mails[0].raw, /From: .*job-hunter@localhost\.test/); } finally { await t2.done(); }
   } finally { await t.done(); }
 });
 
@@ -562,4 +567,16 @@ test('`jobhunt config set` refuses what the run would ignore, and normalises wha
   const cfg = fs.readFileSync(path.join(home, 'config.local.env'), 'utf8');
   assert.match(cfg, /REMOTIVE='on'/); assert.match(cfg, /AI_JSON_MODE='on'/); assert.match(cfg, /AI_BASE_URL='https:\/\/api\.deepseek\.com'/);
   assert.ok(!/MIN_SCORE/.test(cfg));
+});
+
+test('a refused STARTTLS is "certainly not sent" (retried, no cooldown); a local relay on another port is a real server and needs a real sender', { skip }, async () => {
+  const fail = (err) => makeMailer({ SMTP_HOST: 'smtp.example.com', SMTP_PORT: '587' }, () => ({ createTransport: () => ({ sendMail: async () => { throw err; } }) }));
+  assert.equal((await fail(Object.assign(new Error('Error upgrading connection with STARTTLS'), { code: 'ETLS', command: 'STARTTLS' }))({})).status, 'failed');
+  assert.equal((await fail(Object.assign(new Error('Invalid login'), { code: 'EAUTH' }))({})).status, 'failed');
+  assert.equal((await fail(Object.assign(new Error('Connection closed unexpectedly'), { code: 'ECONNECTION' }))({})).status, 'unknown');
+  const t = await setup();
+  try {
+    const r = await run(t.home, t.world, t.smtp, { SMTP_HOST: '127.0.0.1', SMTP_PORT: '25', SMTP_FROM: '', SMTP_USER: '' });   // a relay, not the test mailbox: no sender known
+    assert.equal(t.smtp.mails.length, 0); assert.equal(r.acted.sent.length, 0); assert.ok(r.report.includes('没有配置发信邮箱'), r.report);
+  } finally { await t.done(); }
 });

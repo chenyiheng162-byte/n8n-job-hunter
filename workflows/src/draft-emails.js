@@ -20,7 +20,8 @@ ${profile}`;
 // [1], a comparison like "<2 years"); 【 ... 】 is a normal Chinese subject prefix (【求职申请】) and only counts with a blank-like
 // word inside; （请…） only when it asks to fill something in.
 const BLANK = '(?:姓名|名字|公司|职位|岗位|学校|专业|日期|电话|邮箱|此处|填写|输入|补充|待定|name|company|position|title|date|school|university|phone|email|insert|fill|your|xx)';
-const BAD = new RegExp(`\\[(?![\\d\\s.,;:-]*\\])[^\\]\\n]{0,30}\\]|【[^】\\n]{0,30}${BLANK}[^】\\n]{0,30}】|\\{\\{|\\}\\}|<(?![\\d\\s=])[^>\\n]{0,40}>|\\bXX+\\b|（\\s*(?:此处|请\\s*(?:填写|补充|输入|填|写))[^）]*）|\\(\\s*(?:insert|your|fill)[^)]*\\)|\\byour (?:name|company)\\b|_{3,}|＿{2,}`, 'i');
+const BLANK_CJK = '(?:姓名|名字|此处|填写|输入|补充|待定|xx|name|your|insert|fill)'; // in 【…】 subjects 公司/岗位/职位 are ordinary words (【应聘贵公司数据分析师岗位】)
+const BAD = new RegExp(`\\[(?![\\d\\s.,;:-]*\\])[^\\]\\n]{0,30}\\]|【[^】\\n]{0,30}${BLANK_CJK}[^】\\n]{0,30}】|\\{\\{|\\}\\}|<(?![\\d\\s=])[^>\\n]{0,40}>|\\bXX+\\b|（\\s*(?:此处|请\\s*(?:填写|补充|输入|填|写))[^）]*）|\\(\\s*(?:insert|your|fill)[^)]*\\)|\\byour (?:name|company)\\b|_{3,}|＿{2,}`, 'i');
 const maxBody = (lang) => (lang === 'en' ? maxChars * 2.5 : maxChars * 1.4); // the model counts 字 / words, the check counts characters
 const valid = (d, lang) => d && typeof d.subject === 'string' && typeof d.body === 'string'
   && d.subject.trim().length > 0 && d.subject.length <= 140 && d.body.trim().length >= 60 && d.body.length <= maxBody(lang)
