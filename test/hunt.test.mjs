@@ -580,3 +580,30 @@ test('a refused STARTTLS is "certainly not sent" (retried, no cooldown); a local
     assert.equal(t.smtp.mails.length, 0); assert.equal(r.acted.sent.length, 0); assert.ok(r.report.includes('没有配置发信邮箱'), r.report);
   } finally { await t.done(); }
 });
+
+test('a posting page that redirects is followed only to allowed addresses, hop by hop, in the stage code itself', { skip }, async () => {
+  const jobs = [
+    { title: 'R1 分析', company: 'Red', snippet: '[score:9] 请在官网投递。', redirect: 'http://10.0.0.5/secret' },                                        // into the LAN: refused
+    { title: 'R2 分析', company: 'Red2', snippet: '[score:9] 请在官网投递。', redirect: '/job/R2-final' },                                               // to another page here: followed
+    { title: 'R2-final', company: 'Red2', snippet: 'x', page: '<html><a href="/apply/22">Apply now</a></html>' },                                            // (score 5: skipped as a posting)
+  ];
+  const t = await setup({}, jobs);
+  try {
+    const r = await run(t.home, t.world, t.smtp);
+    const by = Object.fromEntries(r.acted.listed.map((i) => [i.title, i]));
+    assert.equal(by['R1 分析'].applyUrl, ''); assert.match(by['R2 分析'].applyUrl, /\/apply\/22$/);
+    assert.deepEqual(t.world.log.pages.sort(), ['/job/R1%20%E5%88%86%E6%9E%90', '/job/R2%20%E5%88%86%E6%9E%90', '/job/R2-final'].sort());
+  } finally { await t.done(); }
+});
+
+test('the placeholder sender an earlier version persisted is not used with a real mail server', { skip }, async () => {
+  const t = await setup();
+  try {
+    const r = await run(t.home, t.world, t.smtp, { SMTP_FROM: 'job-hunter@localhost.test', SMTP_USER: '' });   // a real (fake) server on a random port, no login
+    assert.equal(t.smtp.mails.length, 0); assert.ok(r.report.includes('没有配置发信邮箱'), r.report);
+    const ok = await run(t.home, t.world, t.smtp, { SMTP_FROM: 'job-hunter@localhost.test', SMTP_USER: 'me@example.org' }, ['--direct', '--force']);
+    assert.equal(ok.acted.sent.length, 0, 'everything was listed in the first run already');
+  } finally { await t.done(); }
+  const t2 = await setup();
+  try { await run(t2.home, t2.world, t2.smtp, { SMTP_FROM: 'job-hunter@localhost.test', SMTP_USER: 'me@example.org' }); assert.equal(t2.smtp.mails.length, 1); assert.match(t2.smtp.mails[0].raw, /From: .*me@example\.org/); assert.ok(!/From: .*localhost\.test/.test(t2.smtp.mails[0].raw)); } finally { await t2.done(); }
+});

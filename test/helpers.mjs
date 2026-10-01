@@ -47,7 +47,7 @@ export async function startFakeWorld({ jobs, aiDown = false, feeds = {}, aiReply
         const draft = { subject: '应聘数据分析实习生', body: bad ? `您好，我是[姓名]，应聘贵公司岗位。${'内容'.repeat(40)}` : good };
         return send(200, { choices: [{ message: { content: JSON.stringify(draft) } }] });
       }
-      if (req.url.startsWith('/job/')) { log.pages.push(req.url); const t = decodeURIComponent(req.url.slice(5)); const j = jobs.find((x) => x.title === t); return send(200, (j && j.page) || '<html><body>no contact here <img src="logo@2x.png"></body></html>', 'text/html'); }
+      if (req.url.startsWith('/job/')) { log.pages.push(req.url); const t = decodeURIComponent(req.url.slice(5)); const j = jobs.find((x) => x.title === t); if (j && j.redirect) { res.writeHead(302, { Location: j.redirect }); return res.end(); } return send(200, (j && j.page) || '<html><body>no contact here <img src="logo@2x.png"></body></html>', 'text/html'); }
       if (req.url.startsWith('/feed/')) { const x = feeds[req.url]; return x ? send(200, typeof x === 'function' ? x(base) : x, 'application/xml; charset=utf-8') : send(404, 'no feed', 'text/plain'); }
       if (req.url.startsWith('/discord')) { log.discord.push(body); return send(204, ''); }
       send(404, 'not found', 'text/plain');

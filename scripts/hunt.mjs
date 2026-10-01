@@ -40,7 +40,9 @@ export const isLocalHost = (h) => /^(127\.0\.0\.1|localhost|::1)$/i.test(String(
 export const usesSink = (s) => isLocalHost(s.SMTP_HOST) && Number(s.SMTP_PORT || 465) === Number(s.JOBHUNT_SINK_PORT || SINK_PORT); // (JOBHUNT_SINK_PORT: tests)
 export const sinkWithoutTestMode = (s) => usesSink(s) && !s.MAIL_REDIRECT_TO;
 // the From address: SMTP_FROM, else the login, else (only for the local test mailbox) a placeholder that is never persisted
-export const fromAddress = (s) => s.SMTP_FROM || s.SMTP_USER || (usesSink(s) ? 'job-hunter@localhost.test' : ''); // (a local relay on another port is a real server: it needs a real sender)
+export const SINK_FROM = 'job-hunter@localhost.test';
+// (an earlier version persisted the placeholder into the settings: it counts as unset anywhere but the test mailbox)
+export const fromAddress = (s) => (s.SMTP_FROM === SINK_FROM && !usesSink(s) ? '' : s.SMTP_FROM) || s.SMTP_USER || (usesSink(s) ? SINK_FROM : '');
 export function resolveSettings(env = process.env) {
   const home = homeDir(env);
   const cfg = loadConfig(home);

@@ -93,9 +93,9 @@ const htmlToText = (h) => decodeEntities(String(h || '').replace(/<(script|style
 const privateV4 = (h) => { const [a, b] = h.split('.').map(Number); return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127); };
 function fetchable(u) {
   const m = String(u || '').match(/^https?:\/\/([^\/?#]*)(?:[\/?#]|$)/i); if (!m) return false;
-  if (E('JOBHUNT_ALLOW_LOCAL_FETCH') === 'on') return true;
   const auth = m[1]; if (auth.includes('@') || auth.startsWith('[')) return false;           // no user info, no IPv6 literal
   const h = auth.replace(/:\d*$/, '').toLowerCase().replace(/\.$/, '');                    // without port and trailing dot
+  if (E('JOBHUNT_ALLOW_LOCAL_FETCH') === 'on' && (h === '127.0.0.1' || h === 'localhost')) return true;   // (tests only)
   const labels = h.split('.');
   if (!/[a-z]/.test(h) || /^\d+$/.test(labels[labels.length - 1]) || labels.some((l) => /^0x/.test(l))) { // an address, not a name (a TLD is never numeric): only a strict decimal dotted quad
     const q = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/); if (!q) return false;

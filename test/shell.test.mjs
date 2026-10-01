@@ -55,6 +55,7 @@ test('install.sh reads the previously chosen run time back from the settings fil
   assert.deepEqual(run(home, '07:00'), [0, '07:00'], 'an explicit argument wins');
   fs.writeFileSync(path.join(home, 'config.local.env'), "AI_MODEL='m'\n");
   assert.deepEqual(run(home, ''), [0, '08:00']);
+  for (const form of ['HUNT_TIME="21:15"', 'HUNT_TIME=21:15']) { fs.writeFileSync(path.join(home, 'config.local.env'), `AI_MODEL='m'\n${form}\n`); assert.deepEqual(run(home, ''), [0, '21:15'], form); }   // every form the loader accepts
   fs.writeFileSync(path.join(home, 'config.local.env'), "AI_MODEL='m'\nHUNT_TIME='09:30'\n");
   // what schedule.sh writes keeps every other line and the file private
   const cfg = path.join(home, 'config.local.env');

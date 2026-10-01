@@ -24,7 +24,7 @@ NODE_SHA256_X64="1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e809
 NOSCHED=0; CONSOLE=1; TIME=""
 for a in "$@"; do case "$a" in --no-schedule) NOSCHED=1 ;; --no-console) CONSOLE=0 ;; -h|--help) sed -n '2,13p' "$0"; exit 0 ;; [0-2][0-9]:[0-5][0-9]) TIME="$a" ;; *) echo "不认识的选项：$a" >&2; exit 1 ;; esac; done
 # no time given: keep the one the user chose earlier (the console / schedule.sh record it), else 08:00
-[ -n "$TIME" ] || [ ! -f "$HOME_DIR/config.local.env" ] || TIME="$(sed -n "s/^HUNT_TIME='\([0-2][0-9]:[0-5][0-9]\)'$/\1/p" "$HOME_DIR/config.local.env" | tail -1)"   # (no file yet on a fresh install: sed must not run, set -e would stop here)
+[ -n "$TIME" ] || [ ! -f "$HOME_DIR/config.local.env" ] || TIME="$(sed -n "s/^HUNT_TIME=[\"']\{0,1\}\([0-2][0-9]:[0-5][0-9]\)[\"']\{0,1\}$/\1/p" "$HOME_DIR/config.local.env" | tail -1)"   # (quoted or bare, as the loader accepts; no file yet on a fresh install: sed must not run, set -e would stop here)
 [ -n "$TIME" ] || TIME="08:00"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -36,6 +36,8 @@ say "检查这台 Mac"
 for tool in curl tar shasum rsync sqlite3 plutil mktemp; do command -v "$tool" >/dev/null || die "缺少系统工具：${tool}"; done
 case "$(uname -m)" in arm64) PLATFORM=darwin-arm64; NODE_SHA256="$NODE_SHA256_ARM64" ;; x86_64) PLATFORM=darwin-x64; NODE_SHA256="$NODE_SHA256_X64" ;; *) die "不支持的处理器：$(uname -m)" ;; esac
 case "$SRC" in "$HOME_DIR"|"$HOME_DIR"/*) die "请在下载解压出来的文件夹里运行 install.sh，不要在 ${HOME_DIR} 里运行。" ;; esac
+# an update must not replace the scripts under a running job (and schedule.sh would refuse at the very end anyway)
+if [ -f "$HOME_DIR/run.lockf" ] && [ -x /usr/bin/lockf ]; then /usr/bin/lockf -k -s -t 0 "$HOME_DIR/run.lockf" /usr/bin/true || die "求职助手正在运行中（通常几分钟），请等它结束后再运行安装命令。什么都还没有改动。"; fi
 EXPECTED_N8N="$(sed -n 's/.*"n8n": *"\([^"]*\)".*/\1/p' "$SRC/package.json" | head -1)"
 has_runtime() { [ -x "$1/.runtime/node/bin/node" ] && [ -x "$1/node_modules/.bin/n8n" ] && [ -d "$1/node_modules/nodemailer" ]; }
 n8n_version() { PATH="$1/.runtime/node/bin:$PATH" "$1/node_modules/.bin/n8n" --version 2>/dev/null | tail -1; }

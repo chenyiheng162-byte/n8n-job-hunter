@@ -96,19 +96,19 @@ test('which links a posting page may be fetched from: public DNS names and plain
   assert.equal(canonicalUrl('https://example.com/j/1?id=7&utm_source=x'), 'https://example.com/j/1?id=7');
 });
 
-test('the direct engine checks every redirect hop when asked to (a public page must not bounce the fetch to a local address)', async () => {
+test('the direct engine understands the n8n options a stage uses to walk redirects itself', async () => {
   const srv = http.createServer((req, res) => {
     if (req.url === '/bounce') { res.writeHead(302, { Location: '/final' }); return res.end(); }
-    if (req.url === '/loop') { res.writeHead(302, { Location: '/loop' }); return res.end(); }
+    if (req.url === '/missing') { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('gone'); }
     res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('final page');
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
-  const base = `http://127.0.0.1:${srv.address().port}`; const seen = [];
+  const base = `http://127.0.0.1:${srv.address().port}`; const h = makeHttp();
   try {
-    assert.equal(await makeHttp()({ url: `${base}/bounce`, redirectAllowed: (u) => { seen.push(u); return true; } }), 'final page');
-    assert.deepEqual(seen, [`${base}/final`]);
-    await assert.rejects(makeHttp()({ url: `${base}/bounce`, redirectAllowed: () => false }), /disallowed/);
-    await assert.rejects(makeHttp()({ url: `${base}/loop`, redirectAllowed: () => true }), /too many redirects/);
-    assert.equal(await makeHttp()({ url: `${base}/bounce` }), 'final page', 'without the option redirects are simply followed');
+    const r = await h({ url: `${base}/bounce`, disableFollowRedirect: true, returnFullResponse: true, ignoreHttpStatusErrors: true });
+    assert.equal(r.statusCode, 302); assert.equal(r.headers.location, '/final');                      // not followed: the stage decides
+    assert.equal(await h({ url: `${base}/bounce` }), 'final page', 'without the option redirects are simply followed');
+    assert.equal((await h({ url: `${base}/missing`, returnFullResponse: true, ignoreHttpStatusErrors: true })).body, 'gone');
+    await assert.rejects(h({ url: `${base}/missing` }), /404/);
   } finally { srv.close(); }
 });

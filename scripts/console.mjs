@@ -20,7 +20,7 @@ import { lockBusy, acquireLock } from './lib/lock.mjs';
 import { startSink, sinkCount } from './lib/sink.mjs';
 import { REGIONS, DEFAULT_REGION, searchLocation } from './lib/regions.mjs';
 import { sourceStatus } from './lib/sources.mjs';
-import { Store, loadNodemailer, makeTransport, fromAddress, usesSink, sinkWithoutTestMode, isLocalHost } from './hunt.mjs';
+import { Store, loadNodemailer, makeTransport, fromAddress, usesSink, sinkWithoutTestMode, isLocalHost, SINK_FROM } from './hunt.mjs';
 import { SINK_PORT } from './lib/constants.mjs';
 
 const here = path.dirname(fs.realpathSync(fileURLToPath(import.meta.url)));
@@ -307,7 +307,8 @@ export function createApi(ctx) {
     },
     'GET /api/settings': () => {
       const v = ctx.cfg();
-      return { resume: ctx.resumeInfo(), fields: FIELDS.map((f) => ({ ...f, value: f.secret ? null : (v[f.key] ?? ''), set: !!v[f.key], hint: f.secret && v[f.key] ? (f.type === 'urls' ? `${v[f.key].split(/\s+/).length} 个 · ${[...new Set(v[f.key].split(/\s+/).map(hostOf))].join('、')}` : f.key === 'DISCORD_WEBHOOK_URL' ? hostOf(v[f.key]) : '已保存在本机') : '' })) };
+      const shown = (f) => (f.key === 'SMTP_FROM' && v.SMTP_FROM === SINK_FROM && !usesSink(v) ? '' : (v[f.key] ?? ''));   // the test mailbox's old placeholder is not a sender to keep
+      return { resume: ctx.resumeInfo(), fields: FIELDS.map((f) => ({ ...f, value: f.secret ? null : shown(f), set: !!v[f.key], hint: f.secret && v[f.key] ? (f.type === 'urls' ? `${v[f.key].split(/\s+/).length} 个 · ${[...new Set(v[f.key].split(/\s+/).map(hostOf))].join('、')}` : f.key === 'DISCORD_WEBHOOK_URL' ? hostOf(v[f.key]) : '已保存在本机') : '' })) };
     },
     'PUT /api/settings': ({ body }) => {
       const changes = (body && body.changes) || {}; const out = {}; const errors = {};

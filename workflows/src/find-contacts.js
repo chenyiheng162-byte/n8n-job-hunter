@@ -30,6 +30,19 @@ function absUrl(href, base) {
   if (/^[a-z][a-z0-9+.-]*:/i.test(h)) return '';                       // some other scheme (mailto:, javascript:, tel: ...)
   return `${m[1]}//${m[2]}${(m[3] || '/').replace(/[^\/]*$/, '')}${h}`;
 }
+// The posting page, following redirects by hand so that EVERY hop must pass fetchable(): the helper is told not to follow
+// redirects and to return the full response (n8n option names; the direct engine understands the same ones).
+async function fetchPage(url) {
+  let target = url;
+  for (let hop = 0; hop < 6; hop++) {
+    const r = await http({ method: 'GET', url: target, headers: { 'User-Agent': UA }, timeout: 15000, disableFollowRedirect: true, returnFullResponse: true, ignoreHttpStatusErrors: true });
+    const status = Number(r && r.statusCode); const hdr = (r && r.headers) || {}; const loc = hdr.location || hdr.Location;
+    if (status >= 300 && status < 400 && loc) { const next = absUrl(String(loc), target); if (!next || !fetchable(next)) throw new Error('redirect refused'); target = next; continue; }
+    if (!(status >= 200 && status < 300)) throw new Error(`page returned ${status}`);
+    return r.body;
+  }
+  throw new Error('too many redirects');
+}
 // The link behind an "Apply" button on the posting page (so "前往投递" opens the application itself, not just the listing).
 function applyLinkIn(html, base) {
   const best = []; let m; const re = /<a\b[^>]*?href\s*=\s*["']([^"'#][^"']*)["'][^>]*>([\s\S]{0,200}?)<\/a>/gi;
@@ -53,7 +66,7 @@ for (const j of input.jobs) {
   let source = 'posting';
   if (!found.length && fetchable(j.url)) {
     try {
-      const page = await http({ method: 'GET', url: j.url, headers: { 'User-Agent': UA }, timeout: 15000, redirectAllowed: fetchable }); // (redirectAllowed: honoured by the direct engine; n8n's helper follows redirects on its own)
+      const page = await fetchPage(j.url);
       const html = typeof page === 'string' ? page.slice(0, 300000) : JSON.stringify(page).slice(0, 300000);
       found = emailsIn(html).filter(ok);
       source = 'page';
