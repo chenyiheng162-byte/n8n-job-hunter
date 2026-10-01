@@ -23,7 +23,9 @@ import { runDirect, runN8n, makeHttp, pruneExecutions } from './engine.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const today = (d = new Date()) => d.toLocaleDateString('sv-SE');
-const csvCell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+// A cell that starts with = + - @ (or a tab / CR) would be run as a formula when the file is opened in Excel; titles and reasons
+// come from third-party sites, so such cells get a leading apostrophe.
+const csvCell = (v) => { const t = String(v ?? ''); return `"${(/^[=+\-@\t\r]/.test(t) ? `'${t}` : t).replace(/"/g, '""')}"`; };
 const redact = (s, secrets = []) => {
   let t = String(s || '').replace(/https?:\/\/\S+/g, '<链接>');
   for (const v of secrets) if (v && v.length >= 6) t = t.split(v).join('<密钥>');

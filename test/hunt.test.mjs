@@ -242,3 +242,13 @@ test('the exact application link is taken from the posting page ("Apply" button)
     assert.equal(events(t.home).pop().applyUrl, item.applyUrl);
   } finally { await t.done(); }
 });
+
+test('to-apply.csv: a posting title that looks like a spreadsheet formula is neutralised', { skip }, async () => {
+  const t = await setup({}, [{ title: '=HYPERLINK("http://evil.example","click")', company: '+cmd', snippet: '[score:9] 请在官网投递。' }]);
+  try {
+    await run(t.home, t.world, t.smtp);
+    const csv = fs.readFileSync(path.join(t.home, 'data', 'to-apply.csv'), 'utf8');
+    assert.match(csv, /"'\+cmd","'=HYPERLINK\(""http:\/\/evil\.example"",""click""\)"/);
+    assert.ok(!/,"=HYPERLINK/.test(csv) && !/,"\+cmd"/.test(csv), 'no cell may start with a formula character');
+  } finally { await t.done(); }
+});
