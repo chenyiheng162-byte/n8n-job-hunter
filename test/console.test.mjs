@@ -334,8 +334,9 @@ test('a run started by launchd shows up as running in the console', async () => 
   const { acquireLock } = await import('../scripts/lib/lock.mjs');
   const lock = await acquireLock(c.home, 'launchd-test');   // the run lock lives in HOME (hunt.mjs takes it there)
   try {
+    c.ctx.run.lines = ['[hunt] old dry run line']; c.ctx.run.code = 1; c.ctx.run.mode = 'dry';            // output of an earlier console run
     const r = (await c.call('GET', '/api/run')).json;
-    assert.deepEqual([r.running, r.external], [true, true]);
+    assert.deepEqual([r.running, r.external, r.lines, r.code, r.mode], [true, true, [], null, 'external'], 'nothing of the earlier run is shown as the launchd run\'s');
     assert.equal((await c.call('POST', '/api/run', { mode: 'dry' })).status, 409);
   } finally { await lock.release(); await c.close(); }
   assert.equal((await (async () => { const c2 = await boot(); try { return (await c2.call('GET', '/api/run')).json.running; } finally { await c2.close(); } })()), false);
@@ -482,5 +483,16 @@ test('清除测试记录 never removes a posting whose last send was real, even 
     const r = (await c.call('POST', '/api/jobs/clear-test')).json; assert.deepEqual([r.ok, r.removed], [true, 1]);
     const jobs = (await c.call('GET', '/api/jobs')).json.jobs;
     assert.equal(jobs.find((j) => j.id === a).status, 'sent', 'the real send record stays (no second mail to hr@a.com)'); assert.ok(!jobs.some((j) => j.id === b));
+  } finally { await c.close(); }
+});
+
+test('a posting that failed three times is shown as such (no further automatic retry)', async () => {
+  const c = await boot();
+  try {
+    const id = '6'.repeat(16);
+    for (let i = 0; i < 3; i++) { c.ctx.appendEvent({ id, status: 'sending', title: 'F', to: 'hr@f.com' }); c.ctx.appendEvent({ id, status: 'failed', title: 'F', to: 'hr@f.com', note: 'EAUTH' }); }
+    c.ctx.appendEvent({ id, status: 'dismissed' }); c.ctx.appendEvent({ id, status: 'failed' });   // a console undo is not an attempt
+    const j = (await c.call('GET', '/api/jobs')).json.jobs.find((x) => x.id === id);
+    assert.deepEqual([j.status, j.group, j.failedAttempts], ['failed', 'attention', 3]);
   } finally { await c.close(); }
 });

@@ -168,13 +168,14 @@ function scheduleInfo(ctx) {
 const httpOnly = (u) => (/^https?:\/\//.test(u || '') ? u : '');
 const STATUS_GROUP = { manual: 'todo', sent: 'sent', sending: 'attention', unknown: 'attention', failed: 'attention', applied: 'done', dismissed: 'done', skipped: 'skipped' };
 function jobsView(ctx) {
-  const merged = new Map();
+  const merged = new Map(); const failedAttempts = new Map();
   for (const e of ctx.events()) {
     const prev = merged.get(e.id) || {};
     merged.set(e.id, { ...prev, ...Object.fromEntries(Object.entries(e).filter(([, v]) => v !== undefined)) });
+    if (e.status === 'failed' && e.to !== undefined) failedAttempts.set(e.id, (failedAttempts.get(e.id) || 0) + 1);   // real attempts, as the workflow counts them
   }
   const rawLogo = new Map(); for (const j of merged.values()) if (httpOnly(j.logo)) rawLogo.set(j.id, j.logo);
-  const jobs = [...merged.values()].map((j) => ({ id: j.id, title: j.title || '', company: j.company || '', location: j.location || '', url: /^https?:\/\//.test(j.url || '') ? j.url : '', source: j.source || '', score: j.score ?? null, reason: j.reason || '', status: j.status, group: STATUS_GROUP[j.status] || 'other', to: j.to || '', intendedTo: j.intendedTo || '', redirected: !!j.redirected, subject: j.subject || '', note: j.note || '', ts: j.ts, salary: j.salary || '', jobType: j.jobType || '', tags: Array.isArray(j.tags) ? j.tags.slice(0, 6) : [], category: j.category || '', hasLogo: rawLogo.has(j.id), postedAt: j.postedAt || 0, summary: j.summary || '', highlights: Array.isArray(j.highlights) ? j.highlights.slice(0, 3) : [], concerns: Array.isArray(j.concerns) ? j.concerns.slice(0, 2) : [], applyUrl: httpOnly(j.applyUrl), contactSource: j.contactSource || '', hasDesc: !!j.desc, hasDraft: !!j.draft }));
+  const jobs = [...merged.values()].map((j) => ({ id: j.id, title: j.title || '', company: j.company || '', location: j.location || '', url: /^https?:\/\//.test(j.url || '') ? j.url : '', source: j.source || '', score: j.score ?? null, reason: j.reason || '', status: j.status, group: STATUS_GROUP[j.status] || 'other', to: j.to || '', intendedTo: j.intendedTo || '', redirected: !!j.redirected, subject: j.subject || '', note: j.note || '', ts: j.ts, salary: j.salary || '', jobType: j.jobType || '', tags: Array.isArray(j.tags) ? j.tags.slice(0, 6) : [], category: j.category || '', hasLogo: rawLogo.has(j.id), postedAt: j.postedAt || 0, summary: j.summary || '', highlights: Array.isArray(j.highlights) ? j.highlights.slice(0, 3) : [], concerns: Array.isArray(j.concerns) ? j.concerns.slice(0, 2) : [], applyUrl: httpOnly(j.applyUrl), contactSource: j.contactSource || '', hasDesc: !!j.desc, hasDraft: !!j.draft, failedAttempts: failedAttempts.get(j.id) || 0 }));
   jobs.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
   const counts = { todo: 0, sent: 0, attention: 0, done: 0, skipped: 0 };
   for (const j of jobs) if (counts[j.group] !== undefined) counts[j.group] += 1;
@@ -399,7 +400,7 @@ export function createApi(ctx) {
       return { status: 404, body: { ok: false, message: '没有找到邮件原文' } };
     },
     'POST /api/run': ({ body }) => { const mode = body && body.mode === 'dry' ? 'dry' : body && body.mode === 'real' ? 'real' : ''; if (!mode) return { status: 400, body: { ok: false } }; const r = startRun(ctx, mode); return r.ok ? r : { status: 409, body: r }; },
-    'GET /api/run': () => { const r = ctx.run; const external = !r.proc && lockBusy(ctx.home); return { running: !!r.proc || external, external, mode: r.mode, startedAt: r.startedAt, code: r.code, lines: r.lines.slice(-200) }; },
+    'GET /api/run': () => { const r = ctx.run; const external = !r.proc && lockBusy(ctx.home); if (external) return { running: true, external: true, mode: 'external', startedAt: 0, code: null, lines: [] }; /* a launchd run: nothing of it is ours to show */ return { running: !!r.proc, external: false, mode: r.mode, startedAt: r.startedAt, code: r.code, lines: r.lines.slice(-200) }; },
     'POST /api/schedule': ({ body }) => {
       const t = String((body && body.time) || '');
       if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) return { status: 400, body: { ok: false, message: '时间格式应为 HH:MM（24 小时制）' } };
