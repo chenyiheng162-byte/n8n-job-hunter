@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Wrapper: puts the runtime's Node and n8n on PATH, then runs the CLI. Works from the repo and from the runtime folder.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+export JOBHUNT_HOME="${JOBHUNT_HOME:-$HOME/.n8n-job-hunter}"
+if [ -z "${JOBHUNT_RUNTIME:-}" ]; then   # install.sh records where Node and n8n live
+  if [ -f "$JOBHUNT_HOME/runtime-path" ]; then JOBHUNT_RUNTIME="$(cat "$JOBHUNT_HOME/runtime-path")"; else JOBHUNT_RUNTIME="$JOBHUNT_HOME"; fi
+fi
+export JOBHUNT_RUNTIME
+export PATH="$JOBHUNT_RUNTIME/.runtime/node/bin:$JOBHUNT_RUNTIME/node_modules/.bin:$PATH"
+exec node "$HERE/jh.mjs" "$@"

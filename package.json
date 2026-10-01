@@ -1,0 +1,16 @@
+{
+  "name": "n8n-job-hunter",
+  "private": true,
+  "description": "Daily job search and application agent powered by n8n",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "build": "node scripts/build-workflow.mjs"
+  },
+  "version": "1.0.0",
+  "dependencies": {
+    "ical.js": "2.2.1",
+    "mammoth": "1.13.0",
+    "n8n": "2.41.4",
+    "unpdf": "1.8.1"
+  }
+}
