@@ -39,7 +39,7 @@ async function fetchPage(url) {
     const status = Number(r && r.statusCode); const hdr = (r && r.headers) || {}; const loc = hdr.location || hdr.Location;
     if (status >= 300 && status < 400 && loc) { const next = absUrl(String(loc), target); if (!next || !fetchable(next)) throw new Error('redirect refused'); target = next; continue; }
     if (!(status >= 200 && status < 300)) throw new Error(`page returned ${status}`);
-    return r.body;
+    return { body: r.body, url: target };   // the final URL: relative links on the page are relative to IT, not to the link we started from
   }
   throw new Error('too many redirects');
 }
@@ -66,11 +66,11 @@ for (const j of input.jobs) {
   let source = 'posting';
   if (!found.length && fetchable(j.url)) {
     try {
-      const page = await fetchPage(j.url);
+      const { body: page, url: pageUrl } = await fetchPage(j.url);
       const html = typeof page === 'string' ? page.slice(0, 300000) : JSON.stringify(page).slice(0, 300000);
       found = emailsIn(html).filter(ok);
       source = 'page';
-      j.applyUrl = applyLinkIn(html, j.url);
+      j.applyUrl = applyLinkIn(html, pageUrl);
     } catch (e) { /* the page is optional */ }
   }
   if (!found.length && searchOn && j.company && j.companyFromSource) { // never search with a company name the AI supplied: the AI must not be able to steer the recipient
