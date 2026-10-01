@@ -24,7 +24,7 @@ NODE_SHA256_X64="1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e809
 NOSCHED=0; CONSOLE=1; TIME=""
 for a in "$@"; do case "$a" in --no-schedule) NOSCHED=1 ;; --no-console) CONSOLE=0 ;; -h|--help) sed -n '2,13p' "$0"; exit 0 ;; [0-2][0-9]:[0-5][0-9]) TIME="$a" ;; *) echo "不认识的选项：$a" >&2; exit 1 ;; esac; done
 # no time given: keep the one the user chose earlier (the console / schedule.sh record it), else 08:00
-[ -n "$TIME" ] || TIME="$(sed -n "s/^HUNT_TIME='\([0-2][0-9]:[0-5][0-9]\)'$/\1/p" "$HOME_DIR/config.local.env" 2>/dev/null | tail -1)"
+[ -n "$TIME" ] || [ ! -f "$HOME_DIR/config.local.env" ] || TIME="$(sed -n "s/^HUNT_TIME='\([0-2][0-9]:[0-5][0-9]\)'$/\1/p" "$HOME_DIR/config.local.env" | tail -1)"   # (no file yet on a fresh install: sed must not run, set -e would stop here)
 [ -n "$TIME" ] || TIME="08:00"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }

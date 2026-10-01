@@ -46,12 +46,16 @@ test('workflow stage code only uses what the n8n Code-node sandbox provides (no 
 test('install.sh reads the previously chosen run time back from the settings file (the line schedule.sh writes)', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'jh-time-'));
   fs.writeFileSync(path.join(home, 'config.local.env'), "AI_MODEL='m'\nHUNT_TIME='09:30'\n");
-  const line = fs.readFileSync(path.join(root, 'install.sh'), 'utf8').split('\n').find((l) => l.includes('sed -n "s/^HUNT_TIME='));
-  assert.ok(line, 'the extraction line exists');
-  const r = spawnSync('bash', ['-c', `HOME_DIR=${JSON.stringify(home)}; TIME=""; ${line}; echo "$TIME"`], { encoding: 'utf8' });
-  assert.equal(r.stdout.trim(), '09:30', r.stderr);
-  const w = spawnSync('bash', ['-c', `HOME_DIR=${JSON.stringify(path.join(home, 'nope'))}; TIME=""; ${line}; echo "[$TIME]"`], { encoding: 'utf8' });
-  assert.equal(w.stdout.trim(), '[]');
+  const lines = fs.readFileSync(path.join(root, 'install.sh'), 'utf8').split('\n'); const at = lines.findIndex((l) => l.includes('sed -n "s/^HUNT_TIME='));
+  assert.ok(at > 0, 'the extraction line exists'); const snippet = lines.slice(at, at + 2).join('\n');   // the lookup and the 08:00 default
+  // under the installer's own options (set -euo pipefail): a saved time is kept, no file (a fresh install!) and no entry both give 08:00
+  const run = (dir, time) => { const r = spawnSync('bash', ['-euo', 'pipefail', '-c', `HOME_DIR=${JSON.stringify(dir)}; TIME=${JSON.stringify(time)}\n${snippet}\necho "$TIME"`], { encoding: 'utf8' }); return [r.status, r.stdout.trim()]; };
+  assert.deepEqual(run(home, ''), [0, '09:30']);
+  assert.deepEqual(run(path.join(home, 'nope'), ''), [0, '08:00'], 'a fresh install has no settings file yet');
+  assert.deepEqual(run(home, '07:00'), [0, '07:00'], 'an explicit argument wins');
+  fs.writeFileSync(path.join(home, 'config.local.env'), "AI_MODEL='m'\n");
+  assert.deepEqual(run(home, ''), [0, '08:00']);
+  fs.writeFileSync(path.join(home, 'config.local.env'), "AI_MODEL='m'\nHUNT_TIME='09:30'\n");
   // what schedule.sh writes keeps every other line and the file private
   const cfg = path.join(home, 'config.local.env');
   const write = fs.readFileSync(path.join(root, 'scripts/schedule.sh'), 'utf8').split('\n').filter((l) => /CFG=|CFG\.new/.test(l)).join('\n');

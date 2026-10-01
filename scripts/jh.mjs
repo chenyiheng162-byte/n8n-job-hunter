@@ -43,8 +43,8 @@ if (cmd === 'console') {
 } else if (cmd === 'config' && rest[0] === 'set' && rest[1]) {
   let v = rest[2];
   if (v === undefined) v = SECRET.test(rest[1]) ? await hidden(`${rest[1]}（输入时不显示）: `) : await new Promise((r) => { const rl = readline.createInterface({ input: process.stdin, output: process.stdout }); rl.question(`${rest[1]}: `, (a) => { rl.close(); r(a); }); });
-  if (rest[1] === 'HUNT_TIME' && v.trim()) {
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v.trim())) { console.error('HUNT_TIME 的格式应为 HH:MM（24 小时制），例如 08:00'); process.exit(1); }
+  if (rest[1] === 'HUNT_TIME') {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v.trim())) { console.error('HUNT_TIME 的格式应为 HH:MM（24 小时制），例如 08:00；它就是定时任务的时间，不能清空'); process.exit(1); }
     // the time lives in the launchd job: (re)install it; schedule.sh records HUNT_TIME once that worked, so status never shows a time that is not installed
     const r = spawnSync('bash', [path.join(here, 'schedule.sh'), v.trim()], { stdio: 'inherit', env: { ...process.env, JOBHUNT_HOME: home } });
     process.exit(r.status ?? 1);
