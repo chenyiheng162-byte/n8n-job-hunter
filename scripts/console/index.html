@@ -16,8 +16,8 @@
   </aside>
   <main class="main"><div id="view"></div></main>
 </div>
-<div id="toasts"></div>
-<div id="modal" class="modal" hidden><div class="modal-card"><div class="modal-head"><b id="modal-title"></b><button class="btn ghost sm" id="modal-close">关闭</button></div><pre id="modal-body"></pre></div></div>
+<div id="toasts" aria-live="polite"></div>
+<div id="modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-card"><div class="modal-head"><b id="modal-title"></b><button class="btn ghost sm" id="modal-close">关闭</button></div><pre id="modal-body" tabindex="0"></pre></div></div>
 <script src="/app.js"></script>
 </body>
 </html>

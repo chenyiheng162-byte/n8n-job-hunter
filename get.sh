@@ -13,6 +13,9 @@ main() {
   if [ -e "$dest" ] && [ ! -f "$dest/install.sh" ]; then
     echo "${dest} 已经存在，但不是这个项目的文件夹。请先把它改名或移走，再运行一次。" >&2; exit 1
   fi
+  if [ -d "$dest/.git" ]; then
+    echo "${dest} 是一个 git 仓库（开发用的副本），不会覆盖它：请在里面直接运行 ./install.sh，或先把它改名。" >&2; exit 1
+  fi
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/jobhunt-get.XXXXXX")"
   trap 'rm -rf "$tmp"' EXIT
   echo "正在下载求职助手……"
@@ -24,6 +27,7 @@ main() {
   rm -rf "$dest.old"; if [ -e "$dest" ]; then mv "$dest" "$dest.old"; fi
   mv "$tmp/src" "$dest"; rm -rf "$dest.old"
   echo "已下载到 ${dest}"
+  rm -rf "$tmp"; trap - EXIT   # (an EXIT trap does not run across exec)
   # install.sh may need the keyboard (Xcode tools prompt, ...), not this script arriving through the pipe
   if (: </dev/tty) 2>/dev/null; then exec bash "$dest/install.sh" "$@" </dev/tty; else exec bash "$dest/install.sh" "$@"; fi
 }

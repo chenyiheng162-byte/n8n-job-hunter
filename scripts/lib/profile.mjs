@@ -7,11 +7,15 @@ const HEAD = { basic: '基本信息', intent: '求职意向' };
 export const emptyProfile = () => Object.fromEntries([...BASIC, ...INTENT, ...TEXTS].map(([k]) => [k, '']));
 const clean = (v) => String(v || '').replace(/\r/g, '').trim().replace(/^（[^）\n]*）$/, '').replace(/待填写[^\n]*/g, '').trim();
 
+// Only the known headings start a section (the template writes them as "## 求职意向（AI 靠这一段…）": a trailing note in brackets
+// is ignored), so a line starting with "## " inside the user's own text cannot swallow the rest of a field.
+const HEADINGS = [HEAD.basic, HEAD.intent, ...TEXTS.map(([, l]) => l)];
+const SECTION = new RegExp(`^## +(?=(?:${HEADINGS.join('|')})\\s*(?:[（(].*)?$)`, 'm');
 export function parseProfile(md) {
   const p = emptyProfile();
-  const parts = String(md || '').split(/^## +/m).slice(1);
+  const parts = String(md || '').replace(/\r/g, '').split(SECTION).slice(1);
   for (const part of parts) {
-    const nl = part.indexOf('\n'); const head = (nl < 0 ? part : part.slice(0, nl)).trim(); const body = nl < 0 ? '' : part.slice(nl + 1);
+    const nl = part.indexOf('\n'); const head = (nl < 0 ? part : part.slice(0, nl)).replace(/\s*[（(].*$/, '').trim(); const body = nl < 0 ? '' : part.slice(nl + 1);
     const group = head === HEAD.basic ? BASIC : head === HEAD.intent ? INTENT : null;
     if (group) {
       for (const line of body.split('\n')) {

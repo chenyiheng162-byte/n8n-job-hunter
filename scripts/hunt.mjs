@@ -17,6 +17,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, homeDir, KEYS, SECRET_KEYS } from './lib/config.mjs';
 import { acquireLock } from './lib/lock.mjs';
+import { sourceStatus } from './lib/sources.mjs';
 import { loadNodemailer as runtimeLoadNodemailer } from './lib/runtime.mjs';
 import { parseProfile, validateProfile } from './lib/profile.mjs';
 import { runDirect, runN8n, makeHttp, pruneExecutions } from './engine.mjs';
@@ -48,8 +49,9 @@ export function preflight({ s, profileFile, cfg }, { forSending = true } = {}) {
   try { profile = fs.readFileSync(profileFile, 'utf8'); } catch (e) { problems.push(`没有找到个人资料：${profileFile}`); }
   if (profile) { const bad = validateProfile(parseProfile(profile)); if (bad.length) problems.push(`个人资料还没填完：${bad.map((b) => `${b.label}（${b.message}）`).join('、')}`); }
   if (!s.AI_BASE_URL || !s.AI_API_KEY) problems.push('还没配置 AI（AI_BASE_URL / AI_API_KEY）');
-  if (!s.JOOBLE_API_KEY && !s.JOB_RSS_URLS && s.REMOTIVE !== 'on') problems.push('还没配置职位来源（JOOBLE_API_KEY / JOB_RSS_URLS / REMOTIVE=on 至少一个）');
-  if (!s.JOB_KEYWORDS && s.JOOBLE_API_KEY) problems.push('还没配置搜索关键词 JOB_KEYWORDS');
+  const src = sourceStatus(s);
+  if (!src.ok) problems.push(s.JOOBLE_API_KEY && !s.JOB_KEYWORDS ? '还没配置搜索关键词 JOB_KEYWORDS（Jooble 需要）' : '还没配置职位来源（JOOBLE_API_KEY / JOB_RSS_URLS / REMOTIVE=on 至少一个）');
+  else warnings.push(...src.warnings);
   if (s.MAIL_REDIRECT_TO) warnings.push(`测试模式已开启：所有投递邮件都会改发到 ${s.MAIL_REDIRECT_TO}，真正的收件人不会收到任何东西`);
   if (forSending && s.AUTO_SEND !== 'off') {
     if (!s.SMTP_HOST || !(s.SMTP_FROM || s.SMTP_USER)) warnings.push('没有配置发信邮箱（SMTP_*）：有邮箱的岗位只会写好信，列出来让你自己发');
@@ -73,8 +75,20 @@ export class Store {
     return t.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
   }
   record(ev) { if (this.dryRun) return; fs.appendFileSync(this.file, `${JSON.stringify({ ts: new Date().toISOString(), ...ev })}\n`); }
-  sentToday(day = today()) { return this.events().filter((e) => ['sent', 'sending', 'unknown'].includes(e.status) && e.ts && today(new Date(e.ts)) === day).length; }
-  lastContact(to) { const l = this.events().filter((e) => e.to && !e.redirected && e.to.toLowerCase() === to.toLowerCase() && ['sent', 'sending', 'unknown'].includes(e.status)).pop(); return l ? Date.parse(l.ts) : 0; }
+  // How many postings were (possibly) mailed today. Counted per posting, not per event: one send writes "sending" AND
+  // "sent" (or "unknown"), and a send that certainly failed frees its slot again.
+  sentToday(day = today()) {
+    const byId = new Map();
+    for (const e of this.events()) { if (!e.id) continue; const c = byId.get(e.id) || { today: false, last: '' }; if (['sent', 'sending', 'unknown'].includes(e.status) && e.ts && today(new Date(e.ts)) === day) c.today = true; c.last = e.status; byId.set(e.id, c); }
+    return [...byId.values()].filter((c) => c.today && c.last !== 'failed').length;
+  }
+  // When was `to` last really written to? Decided per posting by its LAST send status (a failed send reached nobody and must
+  // not start a cooldown; a test-mode send is not real contact). 0 = never.
+  lastContact(to) {
+    const t = String(to).toLowerCase(); const last = new Map();
+    for (const e of this.events()) if (e.id && ['sent', 'sending', 'unknown', 'failed'].includes(e.status)) last.set(e.id, e);
+    return Math.max(0, ...[...last.values()].filter((e) => e.status !== 'failed' && e.to && !e.redirected && String(e.to).toLowerCase() === t).map((e) => Date.parse(e.ts) || 0));
+  }
   marker(name) { return path.join(this.stateDir, name); }
   has(name) { return fs.existsSync(this.marker(name)); }
   set(name) { if (!this.dryRun) fs.writeFileSync(this.marker(name), `${new Date().toISOString()}\n`); }
@@ -91,8 +105,11 @@ export const loadNodemailer = runtimeLoadNodemailer;
 export function makeTransport(s, req) {
   const nodemailer = req('nodemailer');
   const port = Number(s.SMTP_PORT || 465);
+  const secure = s.SMTP_SECURE ? s.SMTP_SECURE === 'on' : port === 465;
+  const local = /^(127\.0\.0\.1|localhost|::1)$/i.test(String(s.SMTP_HOST || ''));
   return nodemailer.createTransport({
-    host: s.SMTP_HOST, port, secure: s.SMTP_SECURE ? s.SMTP_SECURE === 'on' : port === 465,
+    host: s.SMTP_HOST, port, secure,
+    requireTLS: !secure && !local, // on 587 etc. the password only goes out after STARTTLS; never in clear (the local test mailbox has no TLS)
     ...(s.SMTP_USER ? { auth: { user: s.SMTP_USER, pass: s.SMTP_PASS || '' } } : {}),
     connectionTimeout: 20000, greetingTimeout: 20000, socketTimeout: 60000,
   });
@@ -223,15 +240,21 @@ export async function runHunt({ env = process.env, args = [], fetchImpl = global
   }
   if (!dryRun && !force && store.has(`done-${date}`)) { log('today is already done'); return { code: 0, message: 'already done today', report: '' }; }
 
-  // one run at a time, by the system's own file lock (released automatically however this process ends)
-  let lock = null;
-  if (!dryRun) {
-    lock = await acquireLock(store.stateDir, 'hunt');
-    if (!lock.ok) { log(`another run is in progress (${lock.holder})`); return { code: 0, message: 'another run in progress', report: '' }; }
-  }
   const t0 = Date.now();
   const secrets = SECRET_KEYS.map((k) => st.s[k]).filter(Boolean).flatMap((v) => String(v).split(/\s+/));
   const lastRun = (o) => { if (!dryRun) { try { fs.writeFileSync(path.join(store.stateDir, 'last-run.json'), JSON.stringify({ ts: new Date().toISOString(), ms: Date.now() - t0, ...o })); } catch (e) { /* informational */ } } };
+  // One run at a time, by the system's own file lock (released automatically however this process ends). A dry run takes it
+  // too: it runs the same n8n folder and plan file, so it must not overlap a real run. The lock file lives in HOME, outside
+  // data/, so a dry run still writes nothing under data/.
+  const got = await acquireLock(st.home, dryRun ? 'hunt-dry-run' : 'hunt');
+  if (!got.ok && !got.error) { log(`another run is in progress (${got.holder})`); return { code: 0, message: 'another run in progress', report: dryRun ? '已经有一次运行在进行中，请等它结束再试运行' : '' }; }
+  if (!got.ok) { // no lock tool / it broke: say so loudly (exit 1, retried by a later slot) instead of pretending a run is in progress
+    const msg = `求职助手运行失败：无法获取运行锁（${got.message || got.holder}）`;
+    log(msg); lastRun({ result: 'failed', message: msg });
+    if (!dryRun && !store.has(`notified-${date}`)) { store.set(`notified-${date}`); notifier('求职助手', msg.slice(0, 120)); }
+    return { code: 1, message: msg, report: msg };
+  }
+  const lock = got;
   try {
     if (scheduled && st.s.AI_BASE_URL) await waitForNetwork(st.s.AI_BASE_URL, { fetchImpl, log });
     const stageEnv = { ...process.env, ...env, ...st.s, JOBHUNT_HOME: st.home, JOBHUNT_PROFILE_FILE: st.profileFile, JOBHUNT_STATE_FILE: store.file };
@@ -248,7 +271,8 @@ export async function runHunt({ env = process.env, args = [], fetchImpl = global
       }
     }
     // every source failing (network down after waking from sleep) is a failure, not "no new jobs": a later slot tries again
-    if (!plan.fetched && (plan.warnings || []).some((w) => /^(Jooble|Remotive|RSS)/.test(w))) throw new Error(`所有职位来源都失败了：${plan.warnings[0]}`);
+    // (a source that answered with zero postings did not fail)
+    if (!plan.fetched && !plan.sourcesOk && (plan.warnings || []).some((w) => /^(Jooble|Remotive|RSS)/.test(w))) throw new Error(`所有职位来源都失败了：${plan.warnings[0]}`);
 
     // sending
     let sender = send;
@@ -286,7 +310,7 @@ export async function runHunt({ env = process.env, args = [], fetchImpl = global
     if (!dryRun && !store.has(`notified-${date}`)) { store.set(`notified-${date}`); notifier('求职助手', msg.slice(0, 120)); }
     return { code: 1, message: msg, report: msg };
   } finally {
-    if (lock) await lock.release();
+    await lock.release();
   }
 }
 

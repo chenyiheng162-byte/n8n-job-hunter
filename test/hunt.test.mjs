@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { runHunt } from '../scripts/hunt.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { runHunt, preflight, resolveSettings } from '../scripts/hunt.mjs';
+import { acquireLock } from '../scripts/lib/lock.mjs';
 import { tmpdir, writeProfile, startFakeWorld, startFakeSmtp, baseEnv, findNodemailer } from './helpers.mjs';
 
 const nm = findNodemailer();
@@ -250,5 +253,149 @@ test('to-apply.csv: a posting title that looks like a spreadsheet formula is neu
     const csv = fs.readFileSync(path.join(t.home, 'data', 'to-apply.csv'), 'utf8');
     assert.match(csv, /"'\+cmd","'=HYPERLINK\(""http:\/\/evil\.example"",""click""\)"/);
     assert.ok(!/,"=HYPERLINK/.test(csv) && !/,"\+cmd"/.test(csv), 'no cell may start with a formula character');
+  } finally { await t.done(); }
+});
+
+test('daily cap counts postings, not events: a forced second run the same day still has the remaining quota', { skip }, async () => {
+  const mk = (ns) => ns.map((n) => ({ title: `J${n} 分析`, company: `Co${n}`, snippet: `[score:9] 投递 hr${n}@co${n}.com` }));
+  const t = await setup({}, mk([1, 2]));
+  const later = await startFakeWorld({ jobs: mk([3, 4, 5]) });                                  // three NEW postings later the same day
+  try {
+    const first = await run(t.home, t.world, t.smtp, { MAX_APPLICATIONS_PER_DAY: '4' });
+    assert.equal(first.acted.sent.length, 2);
+    const second = await run(t.home, later, t.smtp, { MAX_APPLICATIONS_PER_DAY: '4' }, ['--direct', '--force']);
+    assert.equal(second.acted.sent.length, 2, 'two slots were left (one "sending" + one "sent" event per mail must count once)');
+    assert.equal(second.acted.attention.length, 1);
+    assert.equal(t.smtp.mails.length, 4);
+  } finally { await later.close(); await t.done(); }
+});
+
+test('recipient cooldown: an address written to long ago is used again, a recent one is not (and is said so)', { skip }, async () => {
+  const seed = (home, daysAgo) => { fs.mkdirSync(path.join(home, 'data'), { recursive: true }); fs.writeFileSync(path.join(home, 'data', 'applications.jsonl'), `${JSON.stringify({ ts: new Date(Date.now() - daysAgo * 86400000).toISOString(), id: 'f'.repeat(16), status: 'sent', title: 'Old', to: 'hr@acme-corp.com' })}\n`); };
+  const t = await setup({}, [JOBS[0]]);
+  try {
+    seed(t.home, 45);                                                                           // 45 days ago, cooldown 30: free again
+    const r = await run(t.home, t.world, t.smtp);
+    assert.equal(r.acted.sent.length, 1); assert.deepEqual(t.smtp.mails[0].to, ['hr@acme-corp.com']);
+  } finally { await t.done(); }
+  const t2 = await setup({}, [JOBS[0]]);
+  try {
+    seed(t2.home, 5);                                                                           // 5 days ago: still cooling down
+    const r = await run(t2.home, t2.world, t2.smtp);
+    assert.equal(t2.smtp.mails.length, 0);
+    assert.equal(r.acted.listed.length, 1);                                                     // listed for the user, nothing sent
+    assert.equal(r.acted.listed[0].route, 'site');
+  } finally { await t2.done(); }
+});
+
+test('Remotive: one request per run, also without keywords (the checklist accepts Remotive alone)', { skip }, async () => {
+  const t = await setup({}, [{ title: 'Remote Data Analyst', company: 'Rem', snippet: '[score:9] apply on our site' }]);
+  try {
+    const r = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '', REMOTIVE: 'on', REMOTIVE_API_BASE: `${t.world.base}/remotive` });
+    assert.equal(r.code, 0, r.message);
+    assert.equal(t.world.log.remotive.length, 1);
+    assert.equal(r.acted.listed.length, 1); assert.equal(r.acted.listed[0].source, 'remotive');
+    await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '数据分析, 实习, 后端, 前端', REMOTIVE: 'on', REMOTIVE_API_BASE: `${t.world.base}/remotive` }, ['--direct', '--force']);
+    assert.equal(t.world.log.remotive.length, 2, 'still one request, however many keywords');
+    assert.match(t.world.log.remotive[1], /search=%E6%95%B0%E6%8D%AE%E5%88%86%E6%9E%90/);
+  } finally { await t.done(); }
+});
+
+test('a broken run lock is a failure (exit 1), never "another run is in progress" (exit 0)', { skip }, async () => {
+  const t = await setup();
+  try {
+    const env = { ...process.env, JOBHUNT_RUNTIME: nm && nm.dir, ...baseEnv(t.home, t.world, t.smtp), JOBHUNT_LOCK_TOOL: '/nonexistent/lockf' };
+    const r = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/hunt.mjs', import.meta.url)), '--direct'], { env, encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, /运行锁/);
+    assert.equal(t.smtp.mails.length, 0);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(t.home, 'data', 'state', 'last-run.json'), 'utf8')).result, 'failed');
+  } finally { await t.done(); }
+});
+
+test('a posting keeps its id although the board changes the tracking parameters of its link every day (Jooble, LinkedIn)', { skip }, async () => {
+  // the link carries per-request parameters; the e-mail is in the posting text, so the page itself is never fetched
+  const jooble = { title: 'T 分析', company: 'Track', snippet: '[score:9] 简历请发 hr@track-corp.com', link: (n) => `https://jooble.org/desc/-4153853036742835734?ckey=%E5%88%86%E6%9E%90&rgn=22&pos=${n}&elckey=2089203587920567170&sid=${n}00${n}&age=${n}&scr=${n}.5` };
+  const t = await setup({}, [jooble]);
+  try {
+    const first = await run(t.home, t.world, t.smtp);
+    assert.equal(first.acted.sent.length, 1);
+    const second = await run(t.home, t.world, t.smtp, {}, ['--direct', '--force']);
+    assert.equal(second.plan.items.length, 0, 'the same posting with a different tracking query is not new');
+    assert.equal(t.smtp.mails.length, 1);
+  } finally { await t.done(); }
+  const t2 = await setup({}, [{ ...jooble, link: (n) => `https://www.linkedin.com/jobs/view/3990001234/?refId=r${n}&trackingId=t${n}&position=${n}&pageNum=0` }]);
+  try {
+    await run(t2.home, t2.world, t2.smtp);
+    assert.equal((await run(t2.home, t2.world, t2.smtp, {}, ['--direct', '--force'])).plan.items.length, 0);
+  } finally { await t2.done(); }
+});
+
+test('a send that certainly failed is retried on a later run: its own "sending" record must not start a cooldown', { skip }, async () => {
+  const t = await setup({}, [JOBS[0]]);
+  const refusing = await startFakeSmtp({ mode: 'refuse-rcpt' });
+  try {
+    const r1 = await run(t.home, t.world, t.smtp, { SMTP_PORT: String(refusing.port) });
+    assert.equal(events(t.home).filter((e) => e.title.startsWith('A')).pop().status, 'failed');
+    assert.equal(r1.acted.attention.length, 1);
+    const r2 = await run(t.home, t.world, t.smtp, {}, ['--direct', '--force']);           // the server works again
+    assert.equal(r2.acted.sent.length, 1, 'retried and sent, not listed as "recently written to"');
+    assert.deepEqual(t.smtp.mails.at(-1).to, ['hr@acme-corp.com']);
+  } finally { await refusing.close(); await t.done(); }
+});
+
+test('one failing source next to a source that answered with nothing is "no new jobs", not a failed run', { skip }, async () => {
+  const t = await setup({}, []);                                                                 // Jooble answers: zero postings
+  try {
+    const r = await run(t.home, t.world, t.smtp, { JOB_RSS_URLS: `${t.world.base}/nowhere` });  // the feed is broken
+    assert.equal(r.code, 0, r.message);
+    assert.match(r.report, /今天没有新岗位/); assert.match(r.report, /RSS/);                   // ... and the broken feed is reported
+  } finally { await t.done(); }
+  const t2 = await setup({}, []);
+  try {
+    const r = await run(t2.home, t2.world, t2.smtp, { JOOBLE_API_BASE: `${t2.world.base}/nowhere`, JOB_RSS_URLS: `${t2.world.base}/nowhere` });
+    assert.equal(r.code, 1); assert.match(r.message, /所有职位来源都失败/);                     // nobody answered: a failure (retried later)
+  } finally { await t2.done(); }
+});
+
+test('placeholder check: blanks are caught, ordinary brackets and comparisons are not', { skip }, async () => {
+  const mk = (n, body) => ({ title: `D${n} 分析`, company: `Co${n}`, snippet: `[score:9] [body:${body}] hr${n}@co${n}.com` });
+  const t = await setup({}, [mk(1, '【求职申请】应聘数据分析实习生：我有 <2 years 经验，详见附件（请查收）。' + '补充说明。'.repeat(12)), mk(2, '您好，我是[姓名]，应聘贵公司岗位。' + '内容'.repeat(40)), mk(3, 'Dear Hiring Manager, I am applying for the [Position] role at your company. ' + 'More text here. '.repeat(6))]);
+  try {
+    const r = await run(t.home, t.world, t.smtp);
+    assert.deepEqual(r.acted.sent.map((i) => i.title[1]), ['1']);
+    assert.deepEqual(r.acted.listed.map((i) => i.title[1]).sort(), ['2', '3']);
+    assert.match(r.acted.listed[0].note, /投递邮箱：hr/);                                      // the address is still shown to the user
+  } finally { await t.done(); }
+});
+
+test('a dry run waits its turn too: while another run holds the lock it does nothing (and still writes nothing)', { skip }, async () => {
+  const t = await setup();
+  const held = await acquireLock(t.home, 'scheduled-run');
+  try {
+    const r = await run(t.home, t.world, t.smtp, {}, ['--direct', '--dry-run']);
+    assert.equal(r.message, 'another run in progress'); assert.match(r.report, /进行中/);
+    assert.equal(t.world.log.ai.length, 0, 'no AI calls were made');
+    assert.ok(!fs.existsSync(path.join(t.home, 'data')));
+  } finally { await held.release(); await t.done(); }
+});
+
+test('preflight and the console agree on job sources: a Jooble key without keywords is a warning when another source exists, a problem when alone', () => {
+  const home = tmpdir(); writeProfile(home);
+  const pf = (extra) => preflight(resolveSettings({ JOBHUNT_HOME: home, AI_BASE_URL: 'https://ai.example', AI_API_KEY: 'k', ...extra }), { forSending: false });
+  assert.deepEqual(pf({ JOOBLE_API_KEY: 'j' }).problems.filter((p) => /关键词/.test(p)).length, 1);
+  const mixed = pf({ JOOBLE_API_KEY: 'j', JOB_RSS_URLS: 'https://rss.example/f.xml' });
+  assert.deepEqual(mixed.problems, []); assert.ok(mixed.warnings.some((w) => /Jooble 需要搜索关键词/.test(w)));
+  assert.deepEqual(pf({ REMOTIVE: 'on' }).problems, []);
+  assert.equal(pf({}).problems.filter((p) => /职位来源/.test(p)).length, 1);
+});
+
+test('HR e-mail search needs both keys: with only Serper nothing is searched and the report says why', { skip }, async () => {
+  const t = await setup({}, [{ title: 'S 分析', company: 'Searchable', snippet: '[score:9] 请在官网投递。' }]);
+  try {
+    const r = await run(t.home, t.world, t.smtp, { HR_EMAIL_SEARCH: 'on', SERPER_API_KEY: 'serp', SERPER_API_BASE: `${t.world.base}/nowhere` });
+    assert.equal(r.code, 0, r.message);
+    assert.ok(r.plan.warnings.some((w) => /MAILBOXLAYER_API_KEY/.test(w)), r.plan.warnings.join('; '));
+    assert.ok(!r.plan.warnings.some((w) => /邮箱搜索失败/.test(w)), 'no search was attempted');
   } finally { await t.done(); }
 });

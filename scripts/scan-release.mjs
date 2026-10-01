@@ -9,11 +9,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadConfig, SECRET_KEYS, homeDir } from './lib/config.mjs';
 import { parseProfile } from './lib/profile.mjs';
 
 const PATTERNS = [
-  ['sk- API key', /\bsk-[A-Za-z0-9]{16,}/], ['32+ hex token', /\b[0-9a-f]{32,}\b/i, { skip: /package-lock\.json$/ }], ['Discord webhook', /discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i],
+  ['sk- API key', /\bsk-[A-Za-z0-9_-]{16,}/], ['32+ hex token', /\b[0-9a-f]{32,}\b/i, { skip: /package-lock\.json$/ }], ['Discord webhook', /discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i],
   ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{20,}/], ['AWS key', /\bAKIA[0-9A-Z]{16}\b/], ['private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   ['Google calendar secret', /calendar\.google\.com\/calendar\/ical\/[^\s"']*private-[0-9a-f]+/i], ['home path', /\/Users\/[A-Za-z0-9._-]+\//, { allow: /\/Users\/(name|you|user|yourname|<[^>]*>)\// }],
 ];
@@ -34,11 +35,15 @@ export function realValues() {
   for (const k of SECRET_KEYS) for (const v of String(cfg[k] || '').split(/\s+/)) if (v.length >= 6) vals.add(v);
   for (const k of ['SMTP_USER', 'SMTP_FROM', 'REPLY_TO', 'MAIL_REDIRECT_TO']) if (cfg[k] && cfg[k].length >= 6 && !/@localhost\.test$/.test(cfg[k])) vals.add(cfg[k]);   // (the local test mailbox's own address is not personal)
   try { const p = parseProfile(fs.readFileSync(path.join(homeDir(), 'profile.md'), 'utf8')); for (const k of ['name', 'email', 'phone']) if (p[k] && p[k].length >= 2) vals.add(p[k]); } catch (e) { /* no profile */ }
-  for (const v of [os.userInfo().username, os.homedir()]) if (v && v.length >= 3) vals.add(v);
+  if (os.homedir().length >= 3) vals.add(os.homedir());
   return [...vals];
 }
 
-export function scan(dir, values = realValues()) {
+// The user name is matched as a whole word, and only when it is not a short or ordinary token ("chen" is a substring of the
+// GitHub login, "root"/"user"/"admin" are everywhere in code): the home-path pattern above catches the realistic leak anyway.
+const ORDINARY = new Set(['admin', 'user', 'users', 'guest', 'root', 'test', 'tests', 'node', 'build', 'local', 'shared', 'system', 'server', 'home', 'macos', 'apple', 'claude', 'ubuntu', 'runner']);
+export const userNamePattern = (name = os.userInfo().username) => (name && name.length >= 5 && !ORDINARY.has(name.toLowerCase()) ? new RegExp(`(^|[^A-Za-z0-9_])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i') : null);
+export function scan(dir, values = realValues(), userRe = userNamePattern()) {
   const files = walk(dir); const findings = [];
   // the only long hex strings that belong in the repo: the pinned SHA-256 of the official Node tarballs in install.sh
   let pinned = new Set(); try { pinned = new Set([...fs.readFileSync(path.join(dir, 'install.sh'), 'utf8').matchAll(/NODE_SHA256_\w+="([0-9a-f]{64})"/g)].map((m) => m[1])); } catch (e) { /* no installer */ }
@@ -46,6 +51,7 @@ export function scan(dir, values = realValues()) {
     const buf = fs.readFileSync(f); if (!isText(buf)) continue;
     const text = buf.toString('utf8'); const rel = path.relative(dir, f);
     for (const v of values) if (text.includes(v)) findings.push(`${rel}: contains a real value from this machine (${v.length} chars, starts with "${v.slice(0, 2)}…")`);
+    if (userRe && userRe.test(text) && !/package-lock\.json$/.test(rel)) findings.push(`${rel}: contains this machine's user name`);
     for (const [name, re, o = {}] of PATTERNS) {
       if (o.skip && o.skip.test(rel)) continue;
       for (const m of text.matchAll(new RegExp(re.source, `${re.flags.replace('g', '')}g`))) { if (o.allow && o.allow.test(m[0])) continue; if (name === '32+ hex token' && rel === 'install.sh' && pinned.has(m[0])) continue; findings.push(`${rel}: looks like ${name}`); break; }
@@ -54,7 +60,7 @@ export function scan(dir, values = realValues()) {
   return { findings, checked: { values: values.length, patterns: PATTERNS.length, files: files.length } };
 }
 
-if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname)) {
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))) {   // (not URL.pathname: it is percent-encoded, so a folder with spaces or Chinese characters would throw)
   const dir = process.argv[2]; if (!dir || !fs.existsSync(dir)) { console.error('usage: scan-release.mjs DIR [--self-test]'); process.exit(2); }
   const r = scan(dir);
   console.log(`扫描了 ${r.checked.files} 个文件：${r.checked.values} 个本机真实值、${r.checked.patterns} 种密钥样式`);
@@ -62,7 +68,7 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(new 
   if (r.findings.length) { console.error(`发现 ${r.findings.length} 处问题，不能发布：\n${r.findings.map((x) => `  - ${x}`).join('\n')}`); process.exit(1); }
   if (process.argv.includes('--self-test')) {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-selftest-')); fs.cpSync(dir, tmp, { recursive: true });
-    fs.writeFileSync(path.join(tmp, 'planted.txt'), `key = sk-${'a1b2c3d4'.repeat(4)}\n`);
+    fs.writeFileSync(path.join(tmp, 'planted.txt'), `key = sk-proj-${'a1b2c3d4'.repeat(4)}\n`);   // (an OpenAI project key shape)
     const bad = scan(tmp, r.checked.values ? realValues() : ['planted-real-value']);
     fs.writeFileSync(path.join(tmp, 'planted2.txt'), `value = planted-real-value\n`);
     const bad2 = scan(tmp, ['planted-real-value']); fs.rmSync(tmp, { recursive: true, force: true });

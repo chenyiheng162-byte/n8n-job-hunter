@@ -8,4 +8,9 @@ if [ -z "${JOBHUNT_RUNTIME:-}" ]; then   # install.sh records where Node and n8n
 fi
 export JOBHUNT_RUNTIME
 export PATH="$JOBHUNT_RUNTIME/.runtime/node/bin:$JOBHUNT_RUNTIME/node_modules/.bin:$PATH"
+if ! command -v node >/dev/null 2>&1; then   # the runtime folder is gone (another project's uninstall?): say so where the user can see it
+  msg="求职助手找不到 Node（运行环境 ${JOBHUNT_RUNTIME} 不见了？），请重新运行安装命令"
+  echo "$msg" >&2; command -v osascript >/dev/null 2>&1 && osascript -e "display notification \"$msg\" with title \"求职助手\"" >/dev/null 2>&1 || true
+  exit 1
+fi
 exec node "$HERE/jh.mjs" "$@"

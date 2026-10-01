@@ -11,7 +11,7 @@ import { tmpdir, startFakeWorld, startFakeSmtp, findNodemailer, TEST_PROFILE } f
 
 const nm = findNodemailer();
 const TOKEN = 'a'.repeat(48);
-const SECRET = 'sk-test-secret-value-123456';
+const SECRET = 'test-secret-value-123456-not-a-real-key';
 
 async function boot(opts = {}) {
   const home = tmpdir('jh-console-'); fs.mkdirSync(home, { recursive: true });
@@ -255,7 +255,7 @@ test('local test mailbox: a real SMTP client can deliver to it, and "use it" fil
   const dir = path.join(c.home, 'data', 'sink');
   const sink = startSink({ dir, port: 0 }); await new Promise((r) => sink.once('listening', r));
   try {
-    const t = nm.req('nodemailer').createTransport({ host: '127.0.0.1', port: sink.address().port, secure: false, tls: { rejectUnauthorized: false } });
+    const t = nm.req('nodemailer').createTransport({ host: '127.0.0.1', port: sink.address().port, secure: false, auth: { user: 'me@gmail.com', pass: 'app-password' }, tls: { rejectUnauthorized: false } });   // a real account stays configured: the sink accepts any login
     await t.sendMail({ from: 'a@b.co', to: 'x@y.co', subject: '主题', text: 'hello', attachments: [{ filename: 'r.pdf', content: Buffer.alloc(200000, 1) }] });   // big enough to arrive in several chunks
     assert.equal(sinkCount(dir), 1);
     assert.match(fs.readdirSync(dir)[0], /\.eml$/);
@@ -292,4 +292,107 @@ test('card data reaches the page, and company logos are fetched by the server un
     assert.deepEqual(calls.filter((u) => !u.includes('ok.png')), ['https://cdn.example.org/vec.svg', 'https://cdn.example.org/big.png', 'https://cdn.example.org/redir.png'], 'http, private, loopback, IPv6-private and the redirect to the LAN were refused BEFORE any request to them');
     assert.equal((await c.call('GET', '/api/logo?id=../../x')).status, 400);
   } finally { await c.close(); }
+});
+
+test('the Jooble "test source" button searches exactly what the real run searches (region, or the specific place)', async () => {
+  const c = await boot();
+  const world = await startFakeWorld({ jobs: [{ title: 'A', company: 'Acme', snippet: 'x' }] });
+  try {
+    applyChanges(c.home, { JOB_KEYWORDS: '数据分析', JOOBLE_API_KEY: 'k', JOOBLE_API_BASE: `${world.base}/jooble` });
+    const loc = async () => { const r = (await c.call('POST', '/api/test', { what: 'jobs' })).json; assert.equal(r.ok, true, r.message); return world.log.joobleBodies.at(-1).location; };
+    assert.equal(await loc(), 'Hong Kong');                                                     // the default region, not ""
+    applyChanges(c.home, { JOB_REGION: 'sg' }); assert.equal(await loc(), 'Singapore');
+    applyChanges(c.home, { JOB_LOCATION: 'Kowloon' }); assert.equal(await loc(), 'Kowloon');     // the specific place wins, as in the run
+    applyChanges(c.home, { JOB_LOCATION: null, JOB_REGION: 'global' }); assert.equal(await loc(), '');
+  } finally { await world.close(); await c.close(); }
+});
+
+test('undo puts a posting back to what it was (unknown stays unknown), the test mailbox keeps the saved account, and API calls without the cookie get a JSON answer', async () => {
+  const c = await boot();
+  try {
+    const u = '7'.repeat(16); c.ctx.appendEvent({ id: u, status: 'unknown', title: 'U', to: 'x@y.com', note: 'maybe' });
+    assert.equal((await c.call('POST', '/api/jobs/action', { id: u, action: 'applied' })).json.ok, true);
+    const back = (await c.call('POST', '/api/jobs/action', { id: u, action: 'reopen' })).json;
+    assert.deepEqual([back.ok, back.status], [true, 'unknown']);
+    assert.equal((await c.call('GET', '/api/jobs')).json.jobs.find((j) => j.id === u).group, 'attention', 'not silently turned into a to-do');
+    const m = '8'.repeat(16); c.ctx.appendEvent({ id: m, status: 'manual', title: 'M', url: 'https://x.example' });
+    await c.call('POST', '/api/jobs/action', { id: m, action: 'dismissed' });
+    assert.equal((await c.call('POST', '/api/jobs/action', { id: m, action: 'reopen' })).json.status, 'manual');
+    applyChanges(c.home, { SMTP_HOST: 'smtp.gmail.com', SMTP_PORT: '465', SMTP_USER: 'me@gmail.com', SMTP_PASS: 'app-password-xyz' });
+    assert.equal((await c.call('POST', '/api/sink/use')).json.ok, true);
+    const cfg = fs.readFileSync(path.join(c.home, 'config.local.env'), 'utf8');
+    assert.match(cfg, /SMTP_HOST='127\.0\.0\.1'/); assert.match(cfg, /SMTP_USER='me@gmail\.com'/); assert.match(cfg, /SMTP_PASS='app-password-xyz'/);
+    const nocookie = await c.call('GET', '/api/state', undefined, { cookie: false });
+    assert.equal(nocookie.status, 403); assert.equal(nocookie.json.ok, false); assert.match(nocookie.json.message, /链接/);
+    const big = await c.call('POST', '/api/resume', undefined, { raw: Buffer.alloc(10 * 1024 * 1024, 1) });
+    assert.equal(big.status, 413); assert.match(big.json.message, /8 MB/);
+  } finally { await c.close(); }
+});
+
+test('a run started by launchd shows up as running in the console', async () => {
+  const c = await boot();
+  const { acquireLock } = await import('../scripts/lib/lock.mjs');
+  const lock = await acquireLock(c.home, 'launchd-test');   // the run lock lives in HOME (hunt.mjs takes it there)
+  try {
+    const r = (await c.call('GET', '/api/run')).json;
+    assert.deepEqual([r.running, r.external], [true, true]);
+    assert.equal((await c.call('POST', '/api/run', { mode: 'dry' })).status, 409);
+  } finally { await lock.release(); await c.close(); }
+  assert.equal((await (async () => { const c2 = await boot(); try { return (await c2.call('GET', '/api/run')).json.running; } finally { await c2.close(); } })()), false);
+});
+
+test('the checklist follows the same source rule as the run; a hand-edited HUNT_TIME never breaks the page; the test mailbox switches test mode on', async () => {
+  const c = await boot();
+  try {
+    await c.call('PUT', '/api/profile', { profile: TEST_PROFILE });
+    applyChanges(c.home, { AI_BASE_URL: 'https://api.example.com', AI_API_KEY: SECRET, JOOBLE_API_KEY: 'k' });
+    let st = (await c.call('GET', '/api/state')).json;
+    assert.equal(st.ready, false, 'a Jooble key without keywords is not a usable source');
+    applyChanges(c.home, { JOB_RSS_URLS: 'https://rss.example/f.xml' });
+    st = (await c.call('GET', '/api/state')).json;
+    assert.equal(st.ready, true); assert.match(st.checklist.find((i) => i.id === 'sources').detail, /将使用：RSS.*Jooble 需要搜索关键词/);
+    applyChanges(c.home, { AI_BASE_URL: null });
+    assert.match((await c.call('GET', '/api/state')).json.checklist.find((i) => i.id === 'ai').detail, /接口地址/);
+    applyChanges(c.home, { HUNT_TIME: '8am' });
+    const r = await c.call('GET', '/api/state'); assert.equal(r.status, 200); assert.deepEqual([r.json.schedule.time, r.json.schedule.valid], ['08:00', false]);
+    applyChanges(c.home, { HUNT_TIME: '09:30', SMTP_HOST: 'smtp.gmail.com', SMTP_USER: 'me@gmail.com', SMTP_PASS: 'pw-secret-1' });
+    assert.equal((await c.call('GET', '/api/state')).json.schedule.time, '09:30');
+    const use = (await c.call('POST', '/api/sink/use')).json; assert.equal(use.ok, true);
+    const after = (await c.call('GET', '/api/state')).json;
+    assert.equal(after.test.redirect, 'test@localhost.test', 'a run through the test mailbox is a test run');
+    assert.match(fs.readFileSync(path.join(c.home, 'config.local.env'), 'utf8'), /SMTP_PASS='pw-secret-1'/);
+  } finally { await c.close(); }
+});
+
+test('logos: a dead or refused address is remembered (one fetch, not one per page view) until the posting gets a new address', async () => {
+  const calls = [];
+  const web = { 'https://cdn.example.org/new.png': () => resp(PNG, 'image/png') };
+  const c = await boot({ lookup: async () => [{ address: '93.184.216.34' }], fetchImpl: async (u) => { calls.push(u); return (web[u] || (() => resp(Buffer.alloc(0), 'text/plain', 404)))(); } });
+  try {
+    const id = 'c'.repeat(16);
+    c.ctx.appendEvent({ id, status: 'manual', title: 'T', company: 'Acme', url: 'https://x.example/j', logo: 'https://cdn.example.org/dead.png' });
+    for (let i = 0; i < 3; i++) assert.equal((await c.call('GET', `/api/logo?id=${id}`)).status, 404);
+    assert.equal(calls.length, 1, 'the dead address was fetched once');
+    c.ctx.appendEvent({ id, status: 'manual', logo: 'https://cdn.example.org/new.png' });              // the posting now carries a working logo
+    assert.equal((await c.call('GET', `/api/logo?id=${id}`)).status, 200);
+    assert.equal((await c.call('GET', `/api/logo?id=${id}`)).status, 200);
+    assert.deepEqual(calls, ['https://cdn.example.org/dead.png', 'https://cdn.example.org/new.png']);
+  } finally { await c.close(); }
+});
+
+test('the Discord test posts one message to the webhook and reports the outcome; the schedule says which retry slots exist', async () => {
+  const c = await boot();
+  const world = await startFakeWorld({ jobs: [] });
+  try {
+    assert.equal((await c.call('POST', '/api/test', { what: 'discord' })).json.ok, false);
+    applyChanges(c.home, { DISCORD_WEBHOOK_URL: `${world.base}/discord/hook` });
+    const r = (await c.call('POST', '/api/test', { what: 'discord' })).json; assert.equal(r.ok, true, r.message);
+    assert.equal(world.log.discord.length, 1); assert.match(world.log.discord[0], /测试消息/);
+    applyChanges(c.home, { DISCORD_WEBHOOK_URL: `${world.base}/nowhere` });
+    assert.match((await c.call('POST', '/api/test', { what: 'discord' })).json.message, /404/);
+    applyChanges(c.home, { HUNT_TIME: '23:30' });
+    assert.deepEqual((await c.call('GET', '/api/state')).json.schedule.retries, ['23:50']);                 // past midnight: not installed, and said so
+    applyChanges(c.home, { HUNT_TIME: '08:00' });
+    assert.deepEqual((await c.call('GET', '/api/state')).json.schedule.retries, ['08:20', '08:40', '09:30']);
+  } finally { await world.close(); await c.close(); }
 });

@@ -21,8 +21,11 @@ NODE_VERSION="v24.21.0"   # n8n 2.x needs Node >= 24
 # same server (values from https://nodejs.org/dist/v24.21.0/SHASUMS256.txt).
 NODE_SHA256_ARM64="bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
 NODE_SHA256_X64="1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097"
-NOSCHED=0; CONSOLE=1; TIME="08:00"
+NOSCHED=0; CONSOLE=1; TIME=""
 for a in "$@"; do case "$a" in --no-schedule) NOSCHED=1 ;; --no-console) CONSOLE=0 ;; -h|--help) sed -n '2,13p' "$0"; exit 0 ;; [0-2][0-9]:[0-5][0-9]) TIME="$a" ;; *) echo "不认识的选项：$a" >&2; exit 1 ;; esac; done
+# no time given: keep the one the user chose earlier (the console / schedule.sh record it), else 08:00
+[ -n "$TIME" ] || TIME="$(sed -n "s/^HUNT_TIME='\([0-2][0-9]:[0-5][0-9]\)'$/\1/p" "$HOME_DIR/config.local.env" 2>/dev/null | tail -1)"
+[ -n "$TIME" ] || TIME="08:00"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 [ "$((10#${TIME%%:*}))" -le 23 ] || die "小时要在 00-23 之间"
@@ -49,6 +52,7 @@ elif has_runtime "$HOME/.n8n-morning-brief" && [ "$(n8n_version "$HOME/.n8n-morn
 fi
 if [ -n "$RUNTIME" ]; then
   say "使用已有的 Node 和 n8n：${RUNTIME}（不用再下载）"
+  case "$RUNTIME" in "$HOME_DIR") ;; *) echo "注意：求职助手共用这个文件夹里的 Node 和 n8n。卸载或升级了那个项目之后，请重新运行本安装命令。" ;; esac
 else
   say "安装 Node 和 n8n（第一次需要，约 3 GB，几分钟，请保持联网）"
   VOL="$HOME_DIR"; while [ ! -d "$VOL" ]; do VOL="$(dirname "$VOL")"; done

@@ -32,7 +32,7 @@ if (cmd === 'console') {
   process.exit(r.status ?? 0);
 } else if (cmd === 'run') {
   const r = await runHunt({ args: rest, log: (m) => process.stderr.write(`[hunt] ${m}\n`) });
-  process.stdout.write(`${r.report || r.message || ''}\n`);
+  if (!rest.includes('--scheduled') || rest.includes('--dry-run')) process.stdout.write(`${r.report || r.message || ''}\n`); // launchd runs stay quiet; the report file is the record
   process.exit(r.code);
 } else if (cmd === 'config' && rest[0] === 'show') {
   const c = loadConfig(home);
@@ -42,6 +42,12 @@ if (cmd === 'console') {
 } else if (cmd === 'config' && rest[0] === 'set' && rest[1]) {
   let v = rest[2];
   if (v === undefined) v = SECRET.test(rest[1]) ? await hidden(`${rest[1]}（输入时不显示）: `) : await new Promise((r) => { const rl = readline.createInterface({ input: process.stdin, output: process.stdout }); rl.question(`${rest[1]}: `, (a) => { rl.close(); r(a); }); });
+  if (rest[1] === 'HUNT_TIME' && v.trim()) {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v.trim())) { console.error('HUNT_TIME 的格式应为 HH:MM（24 小时制），例如 08:00'); process.exit(1); }
+    // the time lives in the launchd job: (re)install it; schedule.sh records HUNT_TIME once that worked, so status never shows a time that is not installed
+    const r = spawnSync('bash', [path.join(here, 'schedule.sh'), v.trim()], { stdio: 'inherit', env: { ...process.env, JOBHUNT_HOME: home } });
+    process.exit(r.status ?? 1);
+  }
   setConfig(home, rest[1], v.trim());
   console.log(`${rest[1]} 已保存`);
 } else if (cmd === 'status') {
@@ -68,6 +74,7 @@ if (cmd === 'console') {
   const todo = [...last.values()].filter((e) => e.status === 'manual');
   console.log(todo.length ? todo.map((e) => `- ${e.company ? `${e.company} · ` : ''}${e.title}（${e.score} 分）${e.url}`).join('\n') : '没有待投递的岗位');
 } else {
-  console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 9).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+  const lines = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1); // the comment block at the top is the usage text
+  console.log(lines.slice(0, lines.findIndex((l) => !l.startsWith('//'))).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
   process.exit(cmd ? 1 : 0);
 }

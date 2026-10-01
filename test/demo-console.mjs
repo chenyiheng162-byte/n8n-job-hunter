@@ -8,7 +8,7 @@ import { tmpdir, TEST_PROFILE } from './helpers.mjs';
 
 const home = tmpdir('jh-demo-');
 fs.writeFileSync(path.join(home, 'profile.md'), renderProfile(TEST_PROFILE));
-applyChanges(home, { AI_BASE_URL: 'https://api.deepseek.com', AI_API_KEY: 'sk-demo-demo-demo-demo', AI_MODEL: 'deepseek-chat', JOB_KEYWORDS: '数据分析, 实习', JOOBLE_API_KEY: 'demo-demo-demo', HUNT_TIME: '08:00' });
+applyChanges(home, { AI_BASE_URL: 'https://api.deepseek.com', AI_API_KEY: 'demo-key-not-real-000000', AI_MODEL: 'deepseek-chat', JOB_KEYWORDS: '数据分析, 实习', JOOBLE_API_KEY: 'demo-demo-demo', HUNT_TIME: '08:00' });
 const ctx = makeContext({ home, label: 'com.test.demo-never-installed' });
 const ev = [
   { id: 'a1'.repeat(8), status: 'manual', title: '数据分析实习生', company: '星河科技', location: '上海', source: 'jooble', url: 'https://example.com/jobs/1', score: 9, reason: '技能与岗位要求高度吻合，地点符合。', note: '' },

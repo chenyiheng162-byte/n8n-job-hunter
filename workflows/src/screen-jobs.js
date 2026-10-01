@@ -21,7 +21,7 @@ for (const j of input.jobs) {
     const score = Math.max(0, Math.min(10, Math.round(Number(r.score))));
     if (!Number.isFinite(score)) throw new Error('bad score');
     streak = 0;
-    items.push({ ...j, company: j.company || String(r.company || '').slice(0, 120), score, reason: String(r.reason || '').slice(0, 300), summary: String(r.summary || '').slice(0, 160), highlights: listOf(r.highlights, 3), concerns: listOf(r.concerns, 2), language: r.language === 'en' ? 'en' : 'zh', route: score >= MIN_SCORE ? 'pending' : 'skip' });
+    items.push({ ...j, company: j.company || String(r.company || '').slice(0, 120), companyFromSource: !!j.company, score, reason: String(r.reason || '').slice(0, 300), summary: String(r.summary || '').slice(0, 160), highlights: listOf(r.highlights, 3), concerns: listOf(r.concerns, 2), language: r.language === 'en' ? 'en' : 'zh', route: score >= MIN_SCORE ? 'pending' : 'skip' });
   } catch (e) {
     errors += 1; streak += 1; input.warnings.push(`评分失败（${j.title.slice(0, 40)}）：${safe(e.message)}`);
     if (streak >= 3) throw new Error(`AI 连续 3 次失败，停止评分：${safe(e.message)}`); // the service is down: do not burn through every posting

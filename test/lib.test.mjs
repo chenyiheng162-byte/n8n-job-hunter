@@ -5,8 +5,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { acquireLock, lockBusy } from '../scripts/lib/lock.mjs';
 import { parseProfile, renderProfile, validateProfile, emptyProfile } from '../scripts/lib/profile.mjs';
-import { parseConfig, applyChanges, loadConfig } from '../scripts/lib/config.mjs';
+import { parseConfig, applyChanges, loadConfig, SECRET_KEYS, SECRET } from '../scripts/lib/config.mjs';
 import { tmpdir, TEST_PROFILE } from './helpers.mjs';
+import { REGIONS, searchLocation } from '../scripts/lib/regions.mjs';
 
 test('lock: a second holder is refused, release frees it, and a killed holder frees it too', async () => {
   const dir = tmpdir('jh-lock-');
@@ -49,4 +50,37 @@ test('config: strict parsing, atomic private writes, backup, removal', () => {
   assert.throws(() => applyChanges(home, { AI_MODEL: "it's" }), /quotes/);
   assert.throws(() => applyChanges(home, { NOT_A_KEY: 'x' }), /unknown/);
   assert.deepEqual(fs.readdirSync(home).filter((n) => n.includes('.tmp-')), [], 'no temp files left behind');
+});
+
+test('lock: when no lock tool works the answer is an error, not "held by someone else"', async () => {
+  const dir = tmpdir('jh-lock-');
+  const r = spawn(process.execPath, ['--input-type=module', '-e', `import { acquireLock, lockBusy } from ${JSON.stringify(path.resolve('scripts/lib/lock.mjs'))}; const l = await acquireLock(${JSON.stringify(dir)}, 'x'); console.log(JSON.stringify({ ok: l.ok, error: !!l.error, busy: lockBusy(${JSON.stringify(dir)}) }));`], { env: { ...process.env, JOBHUNT_LOCK_TOOL: '/nonexistent/lockf' }, stdio: ['ignore', 'pipe', 'inherit'] });
+  let out = ''; r.stdout.on('data', (d) => { out += d; }); await new Promise((res) => r.once('exit', res));
+  assert.deepEqual(JSON.parse(out), { ok: false, error: true, busy: false });
+});
+
+test('the region table used by the console is the one baked into the workflow code', () => {
+  const src = fs.readFileSync(path.resolve('workflows/src/lib/common.js'), 'utf8');
+  const line = src.split('\n').find((l) => l.startsWith('const REGIONS = '));
+  const baked = new Function(`${line.replace(/^const REGIONS = /, 'return ')}`)();   // the object literal itself
+  assert.deepEqual(baked, REGIONS);
+  assert.equal(searchLocation({}), 'Hong Kong'); assert.equal(searchLocation({ JOB_REGION: 'sg' }), 'Singapore');
+  assert.equal(searchLocation({ JOB_REGION: 'sg', JOB_LOCATION: 'Jurong' }), 'Jurong'); assert.equal(searchLocation({ JOB_REGION: 'global' }), '');
+  assert.equal(searchLocation({ JOB_REGION: 'atlantis' }), 'Hong Kong');
+});
+
+test('profile: the shipped template filled in by hand (headings with a note in brackets) is read; "## " inside a text field stays text', () => {
+  const tpl = fs.readFileSync(path.resolve('profile.example.md'), 'utf8');
+  assert.match(tpl, /^## 求职意向（/m, 'the template heading this test is about');
+  const filled = tpl.replace('姓名：待填写', '姓名：张三').replace('邮箱：待填写', '邮箱：z@example.com').replace(/想找的岗位：待填写[^\n]*/, '想找的岗位：数据分析实习生').replace(/## 技能\n待填写[^\n]*/, '## 技能\nPython、SQL、Tableau，熟悉数据清洗、可视化与 A/B 测试，英语 CET-6。');
+  const p = parseProfile(filled);
+  assert.equal(p.role, '数据分析实习生'); assert.deepEqual(validateProfile(p), []);
+  const tricky = { ...TEST_PROFILE, experience: '2023 实习\n## 不是标题\n- 做过报表', other: '## 技能 不是一个新节' };
+  assert.deepEqual(parseProfile(renderProfile(tricky)), tricky);
+  assert.equal(parseProfile(renderProfile(tricky).replace(/\n/g, '\r\n')).experience, tricky.experience);   // CRLF files too
+});
+
+test('which settings are secrets: keys, passwords, webhooks and feed links, but not the search keywords', () => {
+  assert.deepEqual(SECRET_KEYS.sort(), ['AI_API_KEY', 'DISCORD_WEBHOOK_URL', 'JOB_RSS_URLS', 'JOOBLE_API_KEY', 'MAILBOXLAYER_API_KEY', 'SERPER_API_KEY', 'SMTP_PASS']);
+  assert.equal(SECRET.test('JOB_KEYWORDS'), false);
 });

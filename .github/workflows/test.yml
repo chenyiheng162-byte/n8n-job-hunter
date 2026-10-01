@@ -1,0 +1,27 @@
+# Runs the offline test suite on every push and pull request, on Linux and on macOS (the real target).
+# The full runtime (Node + n8n, about 3 GB) is not installed: the tests only need nodemailer, at the version the
+# package-lock pins through n8n. The one end-to-end test through a real n8n is skipped without it (as documented in test/).
+name: test
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: nodemailer (the only runtime piece the tests need)
+        run: |
+          mkdir -p "$RUNNER_TEMP/jobhunt-runtime" && cd "$RUNNER_TEMP/jobhunt-runtime"
+          echo '{"name":"jobhunt-test-runtime","private":true}' > package.json
+          npm install --no-audit --no-fund nodemailer@8.0.10
+      - run: npm test
+        env:
+          JOBHUNT_RUNTIME: ${{ runner.temp }}/jobhunt-runtime

@@ -8,7 +8,7 @@ import path from 'node:path';
 export function startSink({ dir, port = 5725 }) {
   fs.mkdirSync(dir, { recursive: true });
   const server = net.createServer((sock) => {
-    let data = false; let buf = ''; let raw = ''; let rcpt = [];
+    let data = false; let buf = ''; let raw = ''; let rcpt = []; let authStep = 0;
     sock.write('220 job-hunter test mailbox\r\n');
     sock.on('data', (chunk) => {
       buf += chunk.toString('latin1');
@@ -23,7 +23,9 @@ export function startSink({ dir, port = 5725 }) {
         }
         const nl = buf.indexOf('\r\n'); if (nl < 0) return;
         const line = buf.slice(0, nl); buf = buf.slice(nl + 2); const u = line.toUpperCase();
-        if (u.startsWith('EHLO') || u.startsWith('HELO')) sock.write('250-test mailbox\r\n250 8BITMIME\r\n');
+        if (u.startsWith('EHLO') || u.startsWith('HELO')) sock.write('250-test mailbox\r\n250-AUTH PLAIN LOGIN\r\n250 8BITMIME\r\n');
+        else if (authStep) { authStep -= 1; sock.write(authStep ? '334 UGFzc3dvcmQ6\r\n' : '235 ok\r\n'); }   // AUTH LOGIN: any user name, any password
+        else if (u === 'AUTH LOGIN') { authStep = 2; sock.write('334 VXNlcm5hbWU6\r\n'); }
         else if (u.startsWith('RCPT TO')) { const m = line.match(/<([^>]*)>/); if (m) rcpt.push(m[1]); sock.write('250 ok\r\n'); }
         else if (u === 'DATA') { data = true; sock.write('354 go\r\n'); }
         else if (u === 'QUIT') { sock.write('221 bye\r\n'); sock.end(); return; }

@@ -18,6 +18,8 @@ import { homeDir, loadConfig, applyChanges, SECRET_KEYS } from './lib/config.mjs
 import { parseProfile, renderProfile, validateProfile, emptyProfile } from './lib/profile.mjs';
 import { lockBusy, acquireLock } from './lib/lock.mjs';
 import { startSink, sinkCount } from './lib/sink.mjs';
+import { REGIONS, DEFAULT_REGION, searchLocation } from './lib/regions.mjs';
+import { sourceStatus } from './lib/sources.mjs';
 import { Store, loadNodemailer, makeTransport } from './hunt.mjs';
 
 const here = path.dirname(fs.realpathSync(fileURLToPath(import.meta.url)));
@@ -39,7 +41,7 @@ export const FIELDS = [
   { key: 'JOB_MAX_AGE_DAYS', group: 'sources', label: '忽略发布超过多少天的岗位', type: 'int', min: 1, max: 365, placeholder: '30' },
   { key: 'SMTP_HOST', group: 'mail', label: 'SMTP 服务器', type: 'host', placeholder: 'smtp.gmail.com' },
   { key: 'SMTP_PORT', group: 'mail', label: '端口', type: 'int', min: 1, max: 65535, placeholder: '465' },
-  { key: 'SMTP_SECURE', group: 'mail', label: '加密方式', type: 'select', options: ['', 'on', 'off'], labels: ['自动（465 端口用 SSL，其它端口用 STARTTLS）', 'SSL', 'STARTTLS / 不加密'] },
+  { key: 'SMTP_SECURE', group: 'mail', label: '加密方式', type: 'select', options: ['', 'on', 'off'], labels: ['自动（465 端口用 SSL，其它端口用 STARTTLS）', 'SSL（465）', 'STARTTLS（587 等；密码只在加密后发送）'], help: '除本机测试邮箱外，连接一定是加密的。' },
   { key: 'SMTP_USER', group: 'mail', label: '登录账号', type: 'text' },
   { key: 'SMTP_PASS', group: 'mail', label: '密码', type: 'text', secret: true, help: 'Gmail 请用"应用专用密码"，不是登录密码。' },
   { key: 'SMTP_FROM', group: 'mail', label: '发件人邮箱', type: 'email', help: '不填就用登录账号。' },
@@ -126,25 +128,27 @@ export function makeContext(opts = {}) {
 
 const effective = (ctx) => ctx.cfg();
 
-const REGION_LABEL = { hk: '香港', cn: '中国大陆', tw: '台湾', sg: '新加坡', jp: '日本', us: '美国', uk: '英国', ca: '加拿大', au: '澳大利亚', global: '不限地区' };
+const regionLabel = (code) => (REGIONS[code] || REGIONS[DEFAULT_REGION]).zh.replace(/（.*$/, '');
 function checklist(ctx) {
-  const s = ctx.cfg(); const prof = validateProfile(ctx.readProfile()); const resume = ctx.resumeInfo();
+  const s = ctx.cfg(); const prof = validateProfile(ctx.readProfile()); const resume = ctx.resumeInfo(); const src = sourceStatus(s);
   const smtpOk = !!(s.SMTP_HOST && (s.SMTP_FROM || s.SMTP_USER));
   return [
     { id: 'profile', label: '个人资料', ok: prof.length === 0, detail: prof.length ? `还差：${prof.map((p) => p.label).join('、')}` : '已填写', page: 'settings', anchor: 'profile' },
-    { id: 'ai', label: 'AI 接口', ok: !!(s.AI_BASE_URL && s.AI_API_KEY), detail: s.AI_API_KEY ? '已设置' : '还没填接口地址和密钥', page: 'settings', anchor: 'ai' },
-    { id: 'sources', label: '职位来源', ok: !!((s.JOOBLE_API_KEY && s.JOB_KEYWORDS) || s.JOB_RSS_URLS || s.REMOTIVE === 'on'), detail: `地区：${REGION_LABEL[s.JOB_REGION || 'hk'] || '香港'}。至少要一个来源：Jooble（要关键词）、RSS 或 Remotive`, page: 'settings', anchor: 'sources' },
+    { id: 'ai', label: 'AI 接口', ok: !!(s.AI_BASE_URL && s.AI_API_KEY), detail: !s.AI_BASE_URL ? '还没填接口地址' : !s.AI_API_KEY ? '还没填 API 密钥' : '已设置', page: 'settings', anchor: 'ai' },
+    { id: 'sources', label: '职位来源', ok: src.ok, detail: `地区：${regionLabel(s.JOB_REGION || DEFAULT_REGION)}。${src.ok ? `将使用：${src.usable.join('、')}` : '至少要一个来源：Jooble（要关键词）、RSS 或 Remotive'}${src.warnings.length ? `；${src.warnings[0]}` : ''}`, page: 'settings', anchor: 'sources' },
     { id: 'mail', label: '发信邮箱', optional: true, ok: smtpOk, detail: smtpOk ? '已设置' : '不填也能用，但有邮箱的岗位只会列出来，不会自动发', page: 'settings', anchor: 'mail' },
     { id: 'resume', label: '简历 PDF', optional: true, ok: resume.set && resume.exists, detail: resume.set ? (resume.exists ? resume.name : '文件找不到了，请重新上传') : '随投递邮件一起发出，不上传就不会自动发邮件', page: 'settings', anchor: 'mail' },
   ];
 }
 
 function scheduleInfo(ctx) {
-  const time = ctx.cfg().HUNT_TIME || '08:00';
+  const raw = ctx.cfg().HUNT_TIME || '08:00';
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(raw); const time = m ? raw : '08:00';   // a hand-edited "8am" must not break the console
   const installed = (spawnSync('launchctl', ['list'], { encoding: 'utf8' }).stdout || '').includes(ctx.label);
-  const [h, m] = time.split(':').map(Number);
-  const next = new Date(); next.setHours(h, m, 0, 0); if (next <= new Date()) next.setDate(next.getDate() + 1);
-  return { time, installed, next: next.toISOString() };
+  const next = new Date(); next.setHours(Number(time.slice(0, 2)), Number(time.slice(3)), 0, 0); if (next <= new Date()) next.setDate(next.getDate() + 1);
+  const start = Number(time.slice(0, 2)) * 60 + Number(time.slice(3));   // the retry slots schedule.sh installs (none past midnight)
+  const retries = [20, 40, 90].map((x) => start + x).filter((t) => t < 1440).map((t) => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`);
+  return { time, installed, next: next.toISOString(), valid: !!m, retries };
 }
 
 const httpOnly = (u) => (/^https?:\/\//.test(u || '') ? u : '');
@@ -185,7 +189,7 @@ async function testJobs(ctx) {
   const kw = (s.JOB_KEYWORDS || '').split(/[,，;；\n]+/).map((x) => x.trim()).filter(Boolean)[0];
   if (s.JOOBLE_API_KEY) {
     if (!kw) out.push({ name: 'Jooble', ok: false, message: '还没填搜索关键词' });
-    else try { const r = await fetchJson(`${s.JOOBLE_API_BASE || 'https://jooble.org/api'}/${s.JOOBLE_API_KEY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keywords: kw, location: s.JOB_LOCATION || '' }) }); out.push({ name: 'Jooble', ok: r.ok, message: r.ok ? `搜"${kw}"得到 ${(r.json && r.json.jobs || []).length} 个岗位` : `返回 ${r.status}（key 对吗？）` }); } catch (e) { out.push({ name: 'Jooble', ok: false, message: `连不上：${redactAll(e.message, ctx.secrets())}` }); }
+    else try { const r = await fetchJson(`${s.JOOBLE_API_BASE || 'https://jooble.org/api'}/${s.JOOBLE_API_KEY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keywords: kw, location: searchLocation(s) }) }); out.push({ name: 'Jooble', ok: r.ok, message: r.ok ? `搜"${kw}"${searchLocation(s) ? `（${searchLocation(s)}）` : ''}得到 ${(r.json && r.json.jobs || []).length} 个岗位` : `返回 ${r.status}（key 对吗？）` }); } catch (e) { out.push({ name: 'Jooble', ok: false, message: `连不上：${redactAll(e.message, ctx.secrets())}` }); }
   }
   for (const feed of (s.JOB_RSS_URLS || '').split(/\s+/).filter(Boolean)) {
     try { const r = await fetchJson(feed); const n = (r.text.match(/<(item|entry)[\s>]/g) || []).length; out.push({ name: `RSS ${hostOf(feed)}`, ok: r.ok && n > 0, message: r.ok ? `读到 ${n} 条` : `返回 ${r.status}` }); } catch (e) { out.push({ name: `RSS ${hostOf(feed)}`, ok: false, message: `连不上：${redactAll(e.message, ctx.secrets())}` }); }
@@ -204,6 +208,13 @@ async function testSmtp(ctx) {
     return { ok: false, message: redactAll(hint, ctx.secrets()) };
   }
 }
+async function testDiscord(ctx) {
+  const s = effective(ctx); if (!s.DISCORD_WEBHOOK_URL) return { ok: false, message: '先填 Webhook 地址并保存' };
+  try {
+    const r = await fetch(s.DISCORD_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: '求职助手：这是一条测试消息，说明 Discord 通知设置正常。' }), signal: AbortSignal.timeout(15000) });
+    return r.ok ? { ok: true, message: '已发送一条测试消息到 Discord，请去频道里看看' } : { ok: false, message: `Discord 返回 ${r.status}（Webhook 地址对吗？）` };
+  } catch (e) { return { ok: false, message: `连不上：${redactAll(e.message, ctx.secrets())}` }; }
+}
 async function testMail(ctx) {
   const s = effective(ctx); const prof = ctx.readProfile();
   const to = s.REPLY_TO || prof.email || s.SMTP_USER;
@@ -219,7 +230,7 @@ async function testMail(ctx) {
 // ---------------------------------------------------------------- running the hunt from the console ---------------------
 function startRun(ctx, mode) {
   const r = ctx.run;
-  if (r.proc || lockBusy(path.join(ctx.home, 'data', 'state'))) return { ok: false, message: '已经有一次运行在进行中' };
+  if (r.proc || lockBusy(ctx.home)) return { ok: false, message: '已经有一次运行在进行中' };
   const args = [path.join(ctx.scriptsDir, 'hunt.mjs'), ...(mode === 'dry' ? ['--dry-run'] : ['--force'])];
   r.mode = mode; r.startedAt = Date.now(); r.lines = []; r.code = null;
   const env = { ...ctx.env, JOBHUNT_HOME: ctx.home };
@@ -242,7 +253,7 @@ export function createApi(ctx) {
       let last = null; try { last = JSON.parse(fs.readFileSync(path.join(ctx.home, 'data', 'state', 'last-run.json'), 'utf8')); } catch (e) { /* none */ }
       const items = checklist(ctx);
       const required = items.filter((i) => !i.optional);
-      return { ready: required.every((i) => i.ok), checklist: items, schedule: scheduleInfo(ctx), lastRun: last, counts, test: { redirect: ctx.cfg().MAIL_REDIRECT_TO || '', sink: { port: ctx.sinkPort, count: sinkCount(path.join(ctx.home, 'data', 'sink')) } }, doneToday: fs.existsSync(path.join(ctx.home, 'data', 'state', `done-${today}`)), running: !!ctx.run.proc || lockBusy(path.join(ctx.home, 'data', 'state')) };
+      return { ready: required.every((i) => i.ok), checklist: items, schedule: scheduleInfo(ctx), lastRun: last, counts, test: { redirect: ctx.cfg().MAIL_REDIRECT_TO || '', sink: { port: ctx.sinkPort, count: sinkCount(path.join(ctx.home, 'data', 'sink')) } }, doneToday: fs.existsSync(path.join(ctx.home, 'data', 'state', `done-${today}`)), running: !!ctx.run.proc || lockBusy(ctx.home) };
     },
     'GET /api/jobs': () => { const { jobs, counts } = jobsView(ctx); return { jobs, counts }; },
     'GET /api/job': ({ query }) => {
@@ -252,10 +263,15 @@ export function createApi(ctx) {
     'GET /api/logo': async ({ query }) => {
       const id = query.get('id') || ''; if (!/^[0-9a-f]{16}$/.test(id)) return { status: 400, body: { ok: false } };
       const dir = path.join(ctx.home, 'data', 'logos'); const f = path.join(dir, id);
-      try { const type = fs.readFileSync(`${f}.type`, 'utf8'); return { status: 200, raw: fs.readFileSync(f), type }; } catch (e) { /* not cached yet */ }
       const url = jobsView(ctx).rawLogo.get(id); if (!url) return { status: 404, body: { ok: false } };
-      const got = await fetchLogo(ctx, url).catch(() => null); if (!got) return { status: 404, body: { ok: false } };
-      fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(f, got.buf); fs.writeFileSync(`${f}.type`, got.type);
+      let cachedUrl = ''; try { cachedUrl = fs.readFileSync(`${f}.url`, 'utf8'); } catch (e) { /* not cached yet */ }
+      if (cachedUrl === url) { // a cached answer, also a negative one (a dead or refused address is not fetched again on every page view)
+        try { const type = fs.readFileSync(`${f}.type`, 'utf8'); return type === 'none' ? { status: 404, body: { ok: false } } : { status: 200, raw: fs.readFileSync(f), type }; } catch (e) { /* fall through */ }
+      }
+      const got = await fetchLogo(ctx, url).catch(() => null);
+      fs.mkdirSync(dir, { recursive: true });
+      if (!got) { try { fs.writeFileSync(`${f}.type`, 'none'); fs.writeFileSync(`${f}.url`, url); fs.rmSync(f, { force: true }); } catch (e) { /* cache only */ } return { status: 404, body: { ok: false } }; }
+      fs.writeFileSync(f, got.buf); fs.writeFileSync(`${f}.type`, got.type); fs.writeFileSync(`${f}.url`, url);
       return { status: 200, raw: got.buf, type: got.type };
     },
     'GET /api/profile': () => { const p = ctx.readProfile(); return { profile: p, missing: validateProfile(p) }; },
@@ -284,7 +300,7 @@ export function createApi(ctx) {
     },
     'POST /api/test': async ({ body }) => {
       const what = body && body.what;
-      if (what === 'ai') return testAi(ctx); if (what === 'jobs') return testJobs(ctx); if (what === 'smtp') return testSmtp(ctx); if (what === 'mail') return testMail(ctx);
+      if (what === 'ai') return testAi(ctx); if (what === 'jobs') return testJobs(ctx); if (what === 'smtp') return testSmtp(ctx); if (what === 'mail') return testMail(ctx); if (what === 'discord') return testDiscord(ctx);
       return { status: 400, body: { ok: false, message: '未知的测试' } };
     },
     'POST /api/resume': ({ raw, headers }) => {
@@ -308,13 +324,15 @@ export function createApi(ctx) {
       const job = jobsView(ctx).jobs.find((j) => j.id === id);
       if (!job) return { status: 404, body: { ok: false, message: '找不到这个岗位' } };
       if (['skipped', 'sent'].includes(job.status)) return { status: 400, body: { ok: false, message: '这个状态不能改' } };
-      ctx.appendEvent({ id, status, note: undefined });
-      return { ok: true };
+      // "put back" means back to what it was before the user marked it (unknown/failed stay what they were); manual when nothing is known
+      const before = action === 'reopen' ? [...ctx.store().events()].reverse().find((e) => e.id === id && e.status && !['applied', 'dismissed'].includes(e.status)) : null;
+      ctx.appendEvent({ id, status: before ? before.status : status, note: undefined });
+      return { ok: true, status: before ? before.status : status };
     },
     'POST /api/jobs/clear-test': async () => {
       // Forget everything that was only a test send (so those postings can be handled for real later). Rewrites the log,
       // so it takes the run lock: a running hunt must not append in the middle of it.
-      const lock = await acquireLock(path.join(ctx.home, 'data', 'state'), 'console-clear-test');
+      const lock = await acquireLock(ctx.home, 'console-clear-test');
       if (!lock.ok) return { status: 409, body: { ok: false, message: '正在运行中，等它结束再清除' } };
       try {
         const file = path.join(ctx.home, 'data', 'applications.jsonl'); let text = ''; try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return { ok: true, removed: 0 }; }
@@ -328,8 +346,10 @@ export function createApi(ctx) {
     },
     'POST /api/sink/use': () => {
       const cur = ctx.cfg();
-      applyChanges(ctx.home, { SMTP_HOST: '127.0.0.1', SMTP_PORT: String(ctx.sinkPort), SMTP_SECURE: 'off', SMTP_USER: null, SMTP_PASS: null, SMTP_FROM: cur.SMTP_FROM || 'job-hunter@localhost.test' });
-      return { ok: true };
+      // The saved account and password stay (the test mailbox accepts any login). Test mode is switched on with it: a run through
+      // the sink must leave "test send" records (clearable, no cooldown), never "sent to hr@company.com" ones.
+      applyChanges(ctx.home, { SMTP_HOST: '127.0.0.1', SMTP_PORT: String(ctx.sinkPort), SMTP_SECURE: 'off', SMTP_FROM: cur.SMTP_FROM || 'job-hunter@localhost.test', MAIL_REDIRECT_TO: cur.MAIL_REDIRECT_TO || 'test@localhost.test' });
+      return { ok: true, redirect: cur.MAIL_REDIRECT_TO || 'test@localhost.test' };
     },
     'GET /api/mail': ({ query }) => {
       const id = query.get('id') || '';
@@ -339,7 +359,7 @@ export function createApi(ctx) {
       return f ? { ok: true, text: fs.readFileSync(path.join(dir, f), 'utf8') } : { status: 404, body: { ok: false, message: '没有找到邮件原文' } };
     },
     'POST /api/run': ({ body }) => { const mode = body && body.mode === 'dry' ? 'dry' : body && body.mode === 'real' ? 'real' : ''; if (!mode) return { status: 400, body: { ok: false } }; const r = startRun(ctx, mode); return r.ok ? r : { status: 409, body: r }; },
-    'GET /api/run': () => { const r = ctx.run; return { running: !!r.proc, mode: r.mode, startedAt: r.startedAt, code: r.code, lines: r.lines.slice(-200) }; },
+    'GET /api/run': () => { const r = ctx.run; const external = !r.proc && lockBusy(ctx.home); return { running: !!r.proc || external, external, mode: r.mode, startedAt: r.startedAt, code: r.code, lines: r.lines.slice(-200) }; },
     'POST /api/schedule': ({ body }) => {
       const t = String((body && body.time) || '');
       if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) return { status: 400, body: { ok: false, message: '时间格式应为 HH:MM（24 小时制）' } };
@@ -377,14 +397,19 @@ export function createServer(ctx, { token, port }) {
         if (!same(url.searchParams.get('t'), token)) return send(res, 403, '链接无效：请用终端里打印的链接打开。', 'text/plain; charset=utf-8');
         return send(res, 303, '', 'text/plain', { Location: '/', 'Set-Cookie': `jobhunt_console=${token}; HttpOnly; SameSite=Strict; Path=/` });
       }
-      if (!same(cookieToken(req), token)) return send(res, 403, '<!doctype html><meta charset="utf-8"><title>求职助手</title><p>请用终端里打印的链接打开控制台（链接里带本次启动有效的口令）。</p>', 'text/html; charset=utf-8');
+      if (!same(cookieToken(req), token)) {
+        if (url.pathname.startsWith('/api/')) return send(res, 403, { ok: false, message: '控制台已重新启动或链接已失效：请用终端里新打印的链接重新打开' });
+        return send(res, 403, '<!doctype html><meta charset="utf-8"><title>求职助手</title><p>请用终端里打印的链接打开控制台（链接里带本次启动有效的口令）。</p>', 'text/html; charset=utf-8');
+      }
       if (req.method !== 'GET' && req.headers['x-jobhunt-console'] !== '1') return send(res, 403, { error: 'missing header' });
       const file = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css' }[url.pathname];
       if (file && req.method === 'GET') return send(res, 200, fs.readFileSync(path.join(UI_DIR, file)), TYPES[path.extname(file)]);
       const handler = api[`${req.method} ${url.pathname}`];
       if (!handler) return send(res, 404, { error: 'not found' });
       const isRaw = url.pathname === '/api/resume';
-      const buf = req.method === 'GET' ? Buffer.alloc(0) : await readBody(req, isRaw ? 9 * 1024 * 1024 : 1024 * 1024);
+      const max = isRaw ? 9 * 1024 * 1024 : 1024 * 1024;
+      if (Number(req.headers['content-length']) > max) return send(res, 413, { ok: false, message: isRaw ? '文件超过 8 MB' : 'too big' });
+      const buf = req.method === 'GET' ? Buffer.alloc(0) : await readBody(req, max);
       let body = null; if (!isRaw && buf.length) { try { body = JSON.parse(buf.toString('utf8')); } catch (e) { return send(res, 400, { error: 'bad json' }); } }
       const out = await handler({ body, raw: isRaw ? buf : null, query: url.searchParams, headers: req.headers });
       if (out && out.raw) return send(res, out.status, out.raw, out.type, { 'Cache-Control': 'private, max-age=86400' });

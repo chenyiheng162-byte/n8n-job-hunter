@@ -23,19 +23,21 @@ export function writeProfile(home) { fs.mkdirSync(home, { recursive: true }); co
 
 // jobs: [{ title, company, link, snippet, page? , score, draft? }]; AI answers by looking for [score:N] / [draft:bad] markers in the posting.
 export async function startFakeWorld({ jobs, aiDown = false }) {
-  const log = { ai: [], sys: [], discord: [], jooble: 0, joobleBodies: [] };
+  const log = { ai: [], sys: [], discord: [], jooble: 0, joobleBodies: [], remotive: [] };
   const server = http.createServer((req, res) => {
     let body = ''; req.on('data', (d) => { body += d; });
     req.on('end', () => {
       const send = (code, obj, type = 'application/json') => { res.writeHead(code, { 'Content-Type': type }); res.end(typeof obj === 'string' ? obj : JSON.stringify(obj)); };
-      if (req.url.startsWith('/jooble/')) { log.jooble += 1; try { log.joobleBodies.push(JSON.parse(body)); } catch (e) { /* none */ } return send(200, { jobs: jobs.map((j) => ({ title: j.title, company: j.company, location: 'Shanghai', snippet: j.snippet, link: `${base}/job/${encodeURIComponent(j.title)}`, updated: new Date().toISOString(), salary: j.salary || '', type: j.type || '' })) }); }
+      if (req.url.startsWith('/jooble/')) { log.jooble += 1; try { log.joobleBodies.push(JSON.parse(body)); } catch (e) { /* none */ } return send(200, { jobs: jobs.map((j) => ({ title: j.title, company: j.company, location: 'Shanghai', snippet: j.snippet, link: typeof j.link === 'function' ? j.link(log.jooble) : j.link || `${base}/job/${encodeURIComponent(j.title)}`, updated: new Date().toISOString(), salary: j.salary || '', type: j.type || '' })) }); }
+      if (req.url.startsWith('/remotive')) { log.remotive.push(req.url); return send(200, { jobs: jobs.map((j) => ({ title: j.title, company_name: j.company, candidate_required_location: 'Worldwide', description: j.snippet, url: `${base}/job/${encodeURIComponent(j.title)}`, publication_date: new Date().toISOString(), job_type: 'full_time', tags: ['sql'] })) }); }
       if (req.url === '/ai/models') return send(200, { data: [{ id: 'm' }, { id: 'other-model' }] });
       if (req.url === '/ai/chat/completions') {
         if (aiDown) return send(500, { error: 'down' });
         const b = JSON.parse(body); const user = b.messages[1].content; const sys = b.messages[0].content;
         log.ai.push(user); log.sys.push(sys);
         if (/只输出 JSON：\{"score"/.test(sys)) { const m = user.match(/\[score:(\d+)\]/); return send(200, { choices: [{ message: { content: JSON.stringify({ score: m ? Number(m[1]) : 5, reason: '测试理由', summary: '测试摘要：负责数据报表', highlights: ['SQL 匹配', 'Tableau 匹配', '远程', '多余第四条'], concerns: ['需要英语'], language: 'zh', company: '' }) } }] }); }
-        const bad = /\[draft:bad\]/.test(user);
+        const bad = /\[draft:bad\]/.test(user); const explicit = user.match(/\[body:([^\]]*(?:\][^\]]*)*?)\] hr/);
+        if (explicit) return send(200, { choices: [{ message: { content: JSON.stringify({ subject: '应聘数据分析实习生', body: explicit[1] }) } }] });
         const good = '您好，我是测试同学，应聘贵公司的数据分析实习岗位。我熟悉 Python、SQL 和 Tableau，做过报表自动化。简历见附件，期待与您联系。\n\n测试同学\n13900001111';
         const draft = { subject: '应聘数据分析实习生', body: bad ? `您好，我是[姓名]，应聘贵公司岗位。${'内容'.repeat(40)}` : good };
         return send(200, { choices: [{ message: { content: JSON.stringify(draft) } }] });

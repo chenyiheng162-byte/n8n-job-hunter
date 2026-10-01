@@ -4,9 +4,11 @@
 //@include common.js
 const input = $input.first().json;
 const state = loadState();
-const searchOn = E('HR_EMAIL_SEARCH', 'off') === 'on' && E('SERPER_API_KEY');
+const searchOn = E('HR_EMAIL_SEARCH', 'off') === 'on' && E('SERPER_API_KEY') && E('MAILBOXLAYER_API_KEY'); // a found address is only used once MailboxLayer confirmed it, so both keys are needed
+if (E('HR_EMAIL_SEARCH', 'off') === 'on' && !searchOn) input.warnings.push('网上搜 HR 邮箱已开启，但 SERPER_API_KEY 和 MAILBOXLAYER_API_KEY 要都填上才会搜，这次没有搜');
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
-const ok = (e) => !state.recipients.has(e); // an address already written to is not used again (cooldown is enforced again when sending)
+const cooldownMs = Number(E('RECIPIENT_COOLDOWN_DAYS', '30')) * 86400000;
+const ok = (e) => { const ts = state.recipients.get(e); return !ts || Date.now() - Date.parse(ts) >= cooldownMs; }; // written to within the cooldown: not used (hunt.mjs checks again when sending)
 
 async function verify(email) { // MailboxLayer: mailbox must exist and not be disposable
   if (!E('MAILBOXLAYER_API_KEY')) return false;
@@ -22,7 +24,7 @@ function absUrl(href, base) {
   if (h.startsWith('//')) return `${m[1]}${h}`;
   if (h.startsWith('/')) return `${m[1]}//${m[2]}${h}`;
   if (/^[a-z][a-z0-9+.-]*:/i.test(h)) return '';                       // some other scheme (mailto:, javascript:, tel: ...)
-  return `${m[1]}//${m[2]}${m[3].replace(/[^\/]*$/, '')}${h}`;
+  return `${m[1]}//${m[2]}${(m[3] || '/').replace(/[^\/]*$/, '')}${h}`;
 }
 // The link behind an "Apply" button on the posting page (so "前往投递" opens the application itself, not just the listing).
 function applyLinkIn(html, base) {
@@ -54,7 +56,7 @@ for (const j of input.jobs) {
       j.applyUrl = applyLinkIn(html, j.url);
     } catch (e) { /* the page is optional */ }
   }
-  if (!found.length && searchOn && j.company) {
+  if (!found.length && searchOn && j.company && j.companyFromSource) { // never search with a company name the AI supplied: the AI must not be able to steer the recipient
     try {
       const r = await http({ method: 'POST', url: E('SERPER_API_BASE', 'https://google.serper.dev/search'), headers: { 'X-API-KEY': E('SERPER_API_KEY') }, body: { q: `${j.company} HR recruiter hiring email` }, json: true, timeout: 20000 });
       const cands = emailsIn(JSON.stringify(r.organic || []).slice(0, 20000)).filter(ok).slice(0, 2);

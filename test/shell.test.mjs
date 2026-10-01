@@ -42,3 +42,20 @@ test('workflow stage code only uses what the n8n Code-node sandbox provides (no 
     assert.equal(m, null, `${path.relative(root, f)} uses ${m && m[0]}, which is not available in n8n's sandbox`);
   }
 });
+
+test('install.sh reads the previously chosen run time back from the settings file (the line schedule.sh writes)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'jh-time-'));
+  fs.writeFileSync(path.join(home, 'config.local.env'), "AI_MODEL='m'\nHUNT_TIME='09:30'\n");
+  const line = fs.readFileSync(path.join(root, 'install.sh'), 'utf8').split('\n').find((l) => l.includes('sed -n "s/^HUNT_TIME='));
+  assert.ok(line, 'the extraction line exists');
+  const r = spawnSync('bash', ['-c', `HOME_DIR=${JSON.stringify(home)}; TIME=""; ${line}; echo "$TIME"`], { encoding: 'utf8' });
+  assert.equal(r.stdout.trim(), '09:30', r.stderr);
+  const w = spawnSync('bash', ['-c', `HOME_DIR=${JSON.stringify(path.join(home, 'nope'))}; TIME=""; ${line}; echo "[$TIME]"`], { encoding: 'utf8' });
+  assert.equal(w.stdout.trim(), '[]');
+  // what schedule.sh writes keeps every other line and the file private
+  const cfg = path.join(home, 'config.local.env');
+  const write = fs.readFileSync(path.join(root, 'scripts/schedule.sh'), 'utf8').split('\n').filter((l) => /CFG=|CFG\.new/.test(l)).join('\n');
+  const s = spawnSync('bash', ['-euo', 'pipefail', '-c', `umask 077; HOME_DIR=${JSON.stringify(home)}; TIME=07:15\n${write}`], { encoding: 'utf8' });
+  assert.equal(s.status, 0, s.stderr);
+  assert.equal(fs.readFileSync(cfg, 'utf8'), "AI_MODEL='m'\nHUNT_TIME='07:15'\n"); assert.equal(fs.statSync(cfg).mode & 0o777, 0o600);
+});

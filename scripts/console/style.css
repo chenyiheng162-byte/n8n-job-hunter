@@ -75,7 +75,7 @@ textarea { min-height: 84px; resize: vertical; }
 .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
 .result { white-space: pre-wrap; font-size: 13px; padding: 6px 10px; border-radius: var(--r-sm); } .result.ok { background: var(--accent-soft); color: var(--accent); } .result.bad { background: var(--bad-soft); color: var(--bad); }
 pre.log { background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px; font: 12px/1.5 var(--mono); max-height: 260px; overflow: auto; white-space: pre-wrap; margin: 10px 0 0; }
-.md h1, .md h2 { margin: 14px 0 6px; } .md ul { padding-left: 18px; margin: 4px 0; }
+.md h1, .md h2, .md h3 { margin: 14px 0 6px; } .md ul { padding-left: 18px; margin: 4px 0; } .md li.sub { list-style: circle; margin-left: 16px; color: var(--muted); } .md a { color: var(--info); overflow-wrap: anywhere; }
 
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid; place-items: center; padding: 20px; z-index: 10; } .modal[hidden] { display: none; }
 .modal-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); max-width: 640px; width: 100%; max-height: 80vh; overflow: auto; padding: 16px; }

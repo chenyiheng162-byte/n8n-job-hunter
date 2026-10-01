@@ -18,14 +18,24 @@ const SEARCH_LOCATION = E('JOB_LOCATION') || REGION.en;
 const sleep = (ms) => (typeof setTimeout === 'function' ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
 const http = (o) => this.helpers.httpRequest(o);
 const safe = (m) => String(m || '').replace(/https?:\/\/\S+/g, '<链接>').replace(/(key|token|bearer)[=: ]+\S+/gi, '$1=<隐藏>').slice(0, 200);
-const startedAt = Date.now();
-const overBudget = () => Date.now() - startedAt > Number(E('STAGE_BUDGET_MS', '900000'));
+// Time budget for the WHOLE run (n8n stops the workflow after 30 minutes): measured from the moment the first stage started,
+// which it passes on as `startedAt`; every later stage stops taking on new postings once it is spent.
+const runStartedAt = (() => { try { const t = Date.parse($input.first().json.startedAt); return Number.isFinite(t) ? t : Date.now(); } catch (e) { return Date.now(); } })();
+const overBudget = () => Date.now() - runStartedAt > Number(E('RUN_BUDGET_MS', '1200000'));
 
 const sha = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 16);
-const jobIdOf = (url, title = '', company = '') => {
-  const u = String(url || '').trim().replace(/#.*$/, '').replace(/[?&](utm_[a-z]+|ref|src|source|trk|trackingId)=[^&]*/gi, '').replace(/[?&]$/, '');
-  return sha(u || `${title}|${company}`);
+// The id of a posting is a hash of its link, so the same posting is recognised again tomorrow. Links from some boards carry
+// per-request tracking parameters (Jooble: ckey, pos, sid, age, scr ...; LinkedIn: refId, trackingId ...), which would give
+// the same posting a new id every day: for those boards the path alone identifies the posting, elsewhere only the
+// well-known tracking parameters are dropped.
+// (Any other link is hashed exactly as before, so the ids in an existing applications.jsonl stay valid.)
+const PATH_IS_ID = /^https?:\/\/([a-z0-9-]+\.)*(jooble\.org\/desc\/|linkedin\.com\/jobs\/view\/)/i;
+const canonicalUrl = (url) => {
+  let u = String(url || '').trim().replace(/#.*$/, '');
+  if (PATH_IS_ID.test(u)) u = u.replace(/\?.*$/, '');
+  return u.replace(/[?&](utm_[a-z]+|ref|refId|src|source|trk|trackingId|fbclid|gclid)=[^&]*/gi, '').replace(/[?&]$/, '');
 };
+const jobIdOf = (url, title = '', company = '') => { const u = canonicalUrl(url); return sha(u || `${title}|${company}`); };
 
 // ---- state: applications.jsonl is append-only; the LAST event of an id is its status ----
 // statuses: skipped | manual | sending | sent | unknown | failed.  A job is "handled" (never looked at again) once it has
@@ -41,8 +51,14 @@ function loadState() {
     const cur = jobs.get(ev.id) || { attempts: 0 };
     if (ev.status === 'failed') cur.attempts += 1;
     cur.status = ev.status; cur.ts = ev.ts; if (ev.score !== undefined) cur.score = ev.score;
+    if (['sending', 'sent', 'unknown', 'failed'].includes(ev.status)) { cur.send = ev.status; cur.sendTs = ev.ts; cur.to = String(ev.to || '').toLowerCase(); cur.redirected = !!ev.redirected; }
     jobs.set(ev.id, cur);
-    if (ev.to && !ev.redirected && ['sending', 'sent', 'unknown'].includes(ev.status)) recipients.set(String(ev.to).toLowerCase(), ev.ts); // test-mode sends (redirected) are not real contact
+  }
+  // Addresses really written to, decided by the LAST send status of each posting: a send that certainly failed reached nobody
+  // and must not block its own retry; test-mode sends (redirected) are not real contact. Value: time of the last contact.
+  for (const s of jobs.values()) {
+    if (!s.to || s.redirected || !['sending', 'sent', 'unknown'].includes(s.send)) continue;
+    const prev = recipients.get(s.to); if (!prev || String(s.sendTs) > String(prev)) recipients.set(s.to, s.sendTs);
   }
   // A posting that was skipped for a score the user has since made acceptable (lowered MIN_SCORE) is looked at again.
   return { jobs, recipients, handled: (id) => { const s = jobs.get(id); return !!s && !(s.status === 'failed' && s.attempts < 3) && !(s.status === 'skipped' && Number.isFinite(s.score) && s.score >= MIN_SCORE); } };
@@ -55,7 +71,8 @@ function readProfile() {
 // ---- text helpers ----
 const decodeEntities = (s) => String(s || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
   .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
-  .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
+  .replace(/&#(\d+);/g, (_, n) => (Number(n) > 0 && Number(n) <= 0x10FFFF ? String.fromCodePoint(Number(n)) : ''))
+  .replace(/&#x([0-9a-f]+);/gi, (_, h) => { const n = parseInt(h, 16); return n > 0 && n <= 0x10FFFF ? String.fromCodePoint(n) : ''; });
 const htmlToText = (h) => decodeEntities(String(h || '').replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<br\s*\/?>|<\/(p|div|li|h\d|tr)>/gi, '\n').replace(/<[^>]+>/g, ' '))
   .replace(/[ \t\f\v ]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
 

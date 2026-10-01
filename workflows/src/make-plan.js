@@ -4,7 +4,7 @@
 const input = $input.first().json;
 const plan = {
   build: input.build, date: new Date().toLocaleDateString('sv-SE'), startedAt: input.startedAt, finishedAt: new Date().toISOString(),
-  fetched: input.fetched, overflow: input.overflow, warnings: input.warnings,
+  fetched: input.fetched, sourcesOk: input.sourcesOk, overflow: input.overflow, warnings: input.warnings,
   items: input.jobs.map((j) => ({ id: j.id, title: j.title, company: j.company, location: j.location, url: j.url, source: j.source, score: j.score, reason: j.reason, route: j.route, salary: j.salary || '', jobType: j.jobType || '', tags: j.tags || [], category: j.category || '', logo: j.logo || '', postedAt: j.postedAt || 0, summary: j.summary || '', highlights: j.highlights || [], concerns: j.concerns || [], applyUrl: j.applyUrl || '', desc: String(j.description || '').slice(0, 1500), to: j.to || '', contactSource: j.contactSource || '', subject: j.subject || '', body: j.body || '', note: j.note || '' })),
 };
 const out = E('JOBHUNT_PLAN_FILE');
