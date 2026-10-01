@@ -65,7 +65,7 @@ test('daily cap: extra e-mail postings wait for tomorrow and are not recorded', 
   try {
     const r = await run(t.home, t.world, t.smtp, { MAX_APPLICATIONS_PER_DAY: '2' });
     assert.equal(t.smtp.mails.length, 2);
-    assert.equal(r.acted.attention.length, 1);
+    assert.equal(r.acted.deferred.length, 1); assert.equal(r.acted.attention.length, 0); assert.match(r.report, /留到明天 1/);
     assert.equal(events(t.home).filter((e) => e.title.startsWith('J3')).length, 0);
   } finally { await t.done(); }
 });
@@ -267,7 +267,7 @@ test('daily cap counts postings, not events: a forced second run the same day st
     assert.equal(first.acted.sent.length, 2);
     const second = await run(t.home, later, t.smtp, { MAX_APPLICATIONS_PER_DAY: '4' }, ['--direct', '--force']);
     assert.equal(second.acted.sent.length, 2, 'two slots were left (one "sending" + one "sent" event per mail must count once)');
-    assert.equal(second.acted.attention.length, 1);
+    assert.equal(second.acted.deferred.length, 1);
     assert.equal(t.smtp.mails.length, 4);
   } finally { await later.close(); await t.done(); }
 });
@@ -536,4 +536,30 @@ test('the same vacancy from another board (another link, same title and company)
     const again = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '', REMOTIVE: 'on', REMOTIVE_API_BASE: `${t.world.base}/remotive` }, ['--direct', '--force']);
     assert.equal(again.plan.fetched, 1); assert.equal(again.plan.items.length, 0);
   } finally { await t.done(); }
+});
+
+test('the local test mailbox without test mode sends nothing: postings are listed with their letter kept, and the report says why', { skip }, async () => {
+  const t = await setup();
+  try {
+    const r = await run(t.home, t.world, t.smtp, { SMTP_HOST: '127.0.0.1', SMTP_PORT: '5725', SMTP_FROM: '', SMTP_USER: '' });   // the sink's address, MAIL_REDIRECT_TO cleared
+    assert.equal(r.code, 0, r.message); assert.equal(r.acted.sent.length, 0);
+    assert.ok(r.report.includes('本机测试邮箱'), r.report);
+    const a = r.acted.listed.find((i) => i.title.startsWith('A')); assert.match(a.note, /本机测试邮箱/);
+    const draft = fs.readdirSync(path.join(t.home, 'data', 'drafts')).find((f) => f.endsWith(`-${a.id}.txt`));
+    assert.ok(draft, 'the letter is kept'); assert.match(fs.readFileSync(path.join(t.home, 'data', 'drafts', draft), 'utf8'), /To: hr@acme-corp\.com[\s\S]*您好，我是测试同学/);
+    assert.equal(events(t.home).find((e) => e.id === a.id && e.status === 'manual').draft, true);
+    // with test mode on, the same setup is a working test setup (nodemailer talks to the fake server standing in for the sink)
+    const t2 = await setup();
+    try { const ok = await run(t2.home, t2.world, t2.smtp, { SMTP_FROM: '', SMTP_USER: '', MAIL_REDIRECT_TO: 'me@example.net' }); assert.equal(ok.acted.sent.length, 1); assert.match(t2.smtp.mails[0].raw, /From: .*job-hunter@localhost\.test/); } finally { await t2.done(); }
+  } finally { await t.done(); }
+});
+
+test('`jobhunt config set` refuses what the run would ignore, and normalises what it can', () => {
+  const home = tmpdir('jh-cli-');
+  const cli = (...args) => spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/jh.mjs', import.meta.url)), 'config', 'set', ...args], { env: { ...process.env, JOBHUNT_HOME: home }, encoding: 'utf8' });
+  assert.equal(cli('MIN_SCORE', '99').status, 1); assert.equal(cli('JOB_REGION', '中国大陆').status, 1); assert.equal(cli('AI_BASE_URL', 'ftp://x').status, 1);
+  assert.equal(cli('REMOTIVE', 'yes').status, 0); assert.equal(cli('AI_JSON_MODE', 'true').status, 0); assert.equal(cli('AI_BASE_URL', 'https://api.deepseek.com/chat/completions').status, 0);
+  const cfg = fs.readFileSync(path.join(home, 'config.local.env'), 'utf8');
+  assert.match(cfg, /REMOTIVE='on'/); assert.match(cfg, /AI_JSON_MODE='on'/); assert.match(cfg, /AI_BASE_URL='https:\/\/api\.deepseek\.com'/);
+  assert.ok(!/MIN_SCORE/.test(cfg));
 });

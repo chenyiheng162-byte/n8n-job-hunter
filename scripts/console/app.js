@@ -80,8 +80,12 @@ async function go(page, anchor, { keepScroll = false } = {}) {
 }
 
 function testBanner() {
-  const t = S.st && S.st.test; if (!t || !t.redirect) return h('span');
-  return h('div', { class: 'banner' }, h('b', { text: '测试模式已开启' }), h('span', { text: `：所有投递邮件都改发到 ${t.redirect}，真正的收件人不会收到任何东西（每封邮件开头会写明"原本要发给谁"）。` }), h('button', { class: 'btn sm', on: { click: () => go('settings', 'test') } }, '去关闭'));
+  const t = S.st && S.st.test; const box = h('div');
+  if (!t) return box;
+  if (t.redirect) box.append(h('div', { class: 'banner' }, h('b', { text: '测试模式已开启' }), h('span', { text: `：所有投递邮件都改发到 ${t.redirect}，真正的收件人不会收到任何东西（每封邮件开头会写明"原本要发给谁"）。${t.sink && t.sink.inUse ? '发信服务器是本机测试邮箱：要正式投递，还要到「发信邮箱」里填真实的 SMTP 服务器。' : ''}` }), h('button', { class: 'btn sm', on: { click: () => go('settings', 'test') } }, '去关闭')));
+  else if (t.sink && t.sink.inUse) box.append(h('div', { class: 'banner' }, h('b', { text: '不会发出任何邮件' }), h('span', { text: '：发信服务器还是本机测试邮箱，而测试模式已关闭。要正式投递，请到「发信邮箱」里填真实的 SMTP 服务器；要继续测试，请重新开启测试模式。' }), h('button', { class: 'btn sm', on: { click: () => go('settings', 'mail') } }, '去设置')));
+  if (t.autoSendOff) box.append(h('div', { class: 'banner' }, h('b', { text: '自动发送已关闭' }), h('span', { text: '：只写信、只列清单，不会发出任何邮件。' }), h('button', { class: 'btn sm', on: { click: () => go('settings', 'rules') } }, '去打开')));
+  return box;
 }
 
 // ---------------------------------------------------------------- shared pieces ----------------------------------
@@ -121,10 +125,14 @@ function jobRow(j, mode) {
     acts.append(h('button', { class: 'btn', on: { click: (e) => toggleMail(j, e.currentTarget.closest('.jcard')) } }, icon('mail'), '邮件预览'));
   } else if (mode === 'attention') {
     if (apply) acts.append(h('a', { class: 'btn', href: apply, target: '_blank', rel: 'noopener noreferrer' }, '打开岗位', icon('ext')));
-    acts.append(h('button', { class: 'btn', on: { click: () => act(j, 'applied') } }, '我已处理'));
+    acts.append(h('button', { class: 'btn', on: { click: () => act(j, 'applied') } }, j.status === 'failed' ? '不再重试（从这里移除）' : '我已确认，移除'));
   } else if (mode === 'done') {
     acts.append(h('button', { class: 'btn ghost', on: { click: () => act(j, 'reopen') } }, '撤销（放回原来的状态）'));
+  } else if (mode === 'all') {
+    if (apply) acts.append(h('a', { class: 'btn', href: apply, target: '_blank', rel: 'noopener noreferrer' }, '打开岗位', icon('ext')));
+    if (j.status === 'skipped') acts.append(h('button', { class: 'btn', title: 'AI 评分不够但你想投：放到待投递里', on: { click: () => act(j, 'reopen') } }, '放到待投递'));
   }
+  if (j.hasDraft && (mode === 'todo' || mode === 'all' || mode === 'done')) acts.append(h('button', { class: 'btn', on: { click: (e) => toggleMail(j, e.currentTarget.closest('.jcard')) } }, icon('mail'), '看写好的邮件'));
   if (j.hasDesc || j.summary) acts.append(h('button', { class: 'btn ghost', on: { click: () => showJob(j) } }, '岗位详情'));
 
   const how = h('div', { class: 'how' });
@@ -133,6 +141,7 @@ function jobRow(j, mode) {
       j.applyUrl ? h('span', { class: 'badge ok', text: '直达申请页' }) : h('span', { class: 'badge', text: '岗位页面（申请入口在页面里）' }),
       j.to ? h('span', { class: 'badge warn', text: `邮箱 ${j.to}（见说明）` }) : null);
   } else if (mode === 'sent' || mode === 'attention') {
+    if (mode === 'attention') how.append(h('span', { class: 'badge warn', text: STATUS_LABEL[j.status] || j.status }), h('span', { class: 'hint', text: { failed: '确定没有发出去。明天会自动重试（最多 3 次）；如果是账号或密码问题，先到「设置 → 发信邮箱」点「验证登录」。', unknown: '可能已经发出：到你邮箱的「已发送」里确认一下；没有的话用「打开岗位」自己投递。不会自动重发。', sending: '上次发送被打断，不知道有没有发出：同上，请自己确认；不会自动重发。' }[j.status] || '' }));
     how.append(h('span', {}, icon('mail'), j.redirected ? ` 原本要发给 ${j.intendedTo}，实际发到 ${j.to}` : ` 发给 ${j.to || '—'}`),
       j.contactSource ? h('span', { class: 'badge', text: { posting: '邮箱来自岗位正文', page: '邮箱来自岗位网页', search: '邮箱来自网上搜索' }[j.contactSource] || j.contactSource }) : null,
       j.redirected ? h('span', { class: 'badge warn', text: '测试发送' }) : null, h('span', { class: 'badge', text: '附简历 PDF' }));
@@ -154,7 +163,7 @@ function jobRow(j, mode) {
 async function toggleMail(j, card) {
   const old = card.querySelector('.mailprev'); if (old) return old.remove();
   const r = await api('GET', `/api/mail?id=${j.id}`);
-  card.querySelector('.jmain').append(h('div', { class: 'mailprev' }, h('div', { class: 'faint sm', text: '这封邮件的原文（连同你的简历 PDF 一起发出）' }), h('pre', { text: r.ok ? r.text : (r.message || '没有找到邮件原文') })));
+  card.querySelector('.jmain').append(h('div', { class: 'mailprev' }, h('div', { class: 'faint sm', text: r.draft ? '为这个岗位写好的邮件（没有发出；可以复制后自己发）' : '这封邮件的原文（连同你的简历 PDF 一起发出）' }), h('pre', { text: r.ok ? r.text : (r.message || '没有找到邮件原文') })));
 }
 async function showJob(j) {
   const r = await api('GET', `/api/job?id=${j.id}`);
@@ -183,8 +192,9 @@ async function pageHome() {
   const st = S.st; const c = S.jobs.counts; const root = h('div');
   root.append(h('h1', { text: '总览' }), h('p', { class: 'sub', text: '每天自动找职位；能发邮件的直接发，不能的列在「待投递」里，由你点开投递。' }));
   const todoHot = c.todo > 0;
+  if (st.configErrors && st.configErrors.length) root.append(h('div', { class: 'banner' }, h('b', { text: '设置文件有看不懂的行' }), h('span', { text: `：config.local.env 第 ${st.configErrors.join('、')} 行无法识别，已忽略（那一项会被当作没有设置）。在设置页把它重新保存一次即可。` })));
   root.append(h('div', { class: 'grid' },
-    stat(c.todo, '待你投递', () => go('todo'), todoHot), stat(c.sent, '已邮件投递', () => go('sent')), stat(c.attention, '需要留意', () => go('sent')), stat(c.skipped, '评分不够，已跳过', () => go('all'))));
+    stat(c.todo, '待你投递', () => go('todo'), todoHot), stat(c.sent, '已邮件投递', () => go('sent')), stat(c.attention, '需要留意', () => go('sent')), stat(c.skipped, '评分不够，已跳过', () => { S.filter = 'skipped'; go('all'); })));
 
   const card = h('div', { class: 'card' });
   if (!st.ready) {
@@ -198,17 +208,18 @@ async function pageHome() {
       h('div', { class: 'grow' }, h('b', { text: i.label }), i.optional ? h('span', { class: 'badge', text: '可选' }) : null, h('div', { class: 'muted sm', text: i.detail })),
       i.ok ? null : h('button', { class: 'btn', on: { click: () => go(i.page, i.anchor) } }, '去填写')));
   }
-  card.append(h('div', { class: 'row' }, h('span', { class: `check ${st.schedule.installed ? 'ok' : ''}` }, st.schedule.installed ? icon('check') : null), h('div', { class: 'grow' }, h('b', { text: '每天定时运行' }), h('div', { class: 'muted sm', text: st.schedule.installed ? `每天 ${st.schedule.time} 自动运行（Mac 需要醒着或插电）` : '还没安装，请重新运行 install.sh' })), h('button', { class: 'btn', on: { click: () => go('settings', 'schedule') } }, '改时间')));
+  card.append(h('div', { class: 'row' }, h('span', { class: `check ${st.schedule.installed ? 'ok' : ''}` }, st.schedule.installed ? icon('check') : null), h('div', { class: 'grow' }, h('b', { text: '每天定时运行' }), h('div', { class: 'muted sm', text: st.schedule.installed ? `每天 ${st.schedule.time} 自动运行（Mac 需要醒着或插电）` : '还没安装：到「运行时间」里点「保存时间」就会装上' })), h('button', { class: 'btn', on: { click: () => go('settings', 'schedule') } }, st.schedule.installed ? '改时间' : '去安装')));
   root.append(card);
 
   const run = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { text: '运行' }), h('span', { class: 'grow' }),
     h('button', { class: 'btn', id: 'run-dry', on: { click: () => startRun('dry') } }, icon('play'), '试运行（不发邮件）'),
     h('button', { class: 'btn primary', id: 'run-real', on: { click: () => { if (confirm('现在真的运行一次？有邮箱的岗位会直接发出投递邮件。')) startRun('real'); } } }, icon('play'), '立即运行')));
   const lr = st.lastRun;
-  run.append(h('div', { class: 'muted sm', text: lr ? `上次：${fmtTime(lr.ts)} · ${{ ok: '成功', failed: '失败', unconfigured: '未配置' }[lr.result] || lr.result}${lr.result === 'ok' ? `（投递 ${lr.sent}，待你投递 ${lr.listed}）` : lr.message ? `：${lr.message}` : ''}` : '还没运行过' }));
-  run.append(h('pre', { class: 'log', id: 'runlog', hidden: true }));
+  run.append(h('div', { class: 'muted sm', text: lr ? `上次：${fmtTime(lr.ts)} · ${{ ok: '成功', failed: '失败', unconfigured: '未配置' }[lr.result] || lr.result}${lr.result === 'ok' ? `（${lr.testMode ? '测试模式，没有真正发出：' : ''}投递 ${lr.sent}，待你投递 ${lr.listed}${lr.deferred ? `，留到明天 ${lr.deferred}` : ''}）` : lr.message ? `：${lr.message}` : ''}` : '还没运行过' }));
+  run.append(h('pre', { class: 'log', id: 'runlog', hidden: true }), h('div', { id: 'runreport' }));
   root.append(run);
   if (st.running) pollRun();
+  else { const last = await api('GET', '/api/run'); if (last.ok !== false && last.lines && last.lines.length) { run.insertBefore(h('div', { class: 'muted sm', text: `${last.mode === 'dry' ? '上次试运行' : '上次手动运行'}的输出（${fmtTime(last.startedAt)}）：` }), $('#runlog') || run.lastChild); showRunOutput(last.lines); } }
 
   if (c.todo) {
     const t = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { text: '最新的待投递' }), h('span', { class: 'grow' }), h('button', { class: 'btn ghost sm', on: { click: () => go('todo') } }, '查看全部')));
@@ -239,16 +250,27 @@ function pollRun() {
     if (!sawRun && r.code === null) return;
     if (r.code !== null && !r.external) toast(r.code === 0 ? '运行完成' : '运行结束（有提示，见下方）', r.code !== 0);
     await go('home', undefined, { keepScroll: true });                                           // fresh counts, checklist and 上次运行
-    const fresh = $('#runlog'); if (fresh && lines.length) { fresh.hidden = false; fresh.textContent = lines.join('\n'); }
+    if (lines.length) showRunOutput(lines);
   };
   S.runTimer = setInterval(tick, 1000); tick();
+}
+// the progress lines go in the log box; the report at the end (Markdown) is rendered like on the 日报 page
+function showRunOutput(lines) {
+  const box = $('#runlog'); const rep = $('#runreport'); if (!box || !rep) return;
+  let i = lines.length; while (i > 0 && !/^\[hunt\] /.test(lines[i - 1])) i -= 1;   // the report follows the last [hunt] line
+  const log = lines.slice(0, i); const report = lines.slice(i).join('\n').trim();
+  box.hidden = !log.length; box.textContent = log.map((l) => l.replace(/^\[hunt\] /, '')).join('\n'); box.scrollTop = box.scrollHeight;
+  rep.replaceChildren(); if (report) rep.append(/^# /.test(report) ? renderMd(report) : h('pre', { class: 'log', text: report }));
 }
 
 // ---------------------------------------------------------------- job lists --------------------------------------
 async function pageTodo() {
   const root = h('div', {}, h('h1', { text: '待投递' }), h('p', { class: 'sub', text: '这些岗位没找到可以发邮件的地址。点「前往投递」去岗位页面自己投递，投完点「我已投递」。' }));
   const list = S.jobs.jobs.filter((j) => j.group === 'todo'); const card = h('div', { class: 'card' });
-  if (!list.length) card.append(emptyState('现在没有待投递的岗位', '没找到邮箱的岗位会出现在这里，附上投递页面的链接')); else root.append(statStrip(list)); for (const j of list) card.append(jobRow(j, 'todo'));
+  const old = list.filter((j) => Date.now() - Date.parse(j.ts) > 30 * 86400000).length;
+  if (!list.length) card.append(emptyState('现在没有待投递的岗位', '没找到邮箱的岗位会出现在这里，附上投递页面的链接'));
+  else root.append(statStrip(list, old ? h('button', { class: 'btn sm', on: { click: async () => { if (!confirm(`把 30 天前列出的 ${old} 个岗位标记为忽略？（可以在「已处理」里放回来）`)) return; const r = await api('POST', '/api/jobs/dismiss-older', { days: 30 }); if (!r.ok) return toast(r.message || '操作失败', true); toast(`已忽略 ${r.removed} 个`); go('todo'); } } }, `忽略 30 天前的（${old} 个）`) : null));
+  for (const j of list) card.append(jobRow(j, 'todo'));
   root.append(card);
   const done = S.jobs.jobs.filter((j) => j.group === 'done');
   if (done.length) { const d = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { text: '已处理' }), h('span', { class: 'badge', text: String(done.length) }), h('span', { class: 'muted sm', text: '点错了？随时可以放回待投递' }))); for (const j of done) d.append(jobRow(j, 'done')); root.append(d); }

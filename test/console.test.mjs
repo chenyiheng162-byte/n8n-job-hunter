@@ -262,7 +262,7 @@ test('local test mailbox: a real SMTP client can deliver to it, and "use it" fil
     assert.match(fs.readFileSync(path.join(dir, fs.readdirSync(dir)[0]), 'utf8'), /X-Original-Rcpt: x@y\.co/);
     assert.equal((await c.call('POST', '/api/sink/use')).json.ok, true);
     const v = Object.fromEntries((await c.call('GET', '/api/settings')).json.fields.map((f) => [f.key, f.value]));
-    assert.deepEqual([v.SMTP_HOST, v.SMTP_SECURE, v.SMTP_FROM], ['127.0.0.1', 'off', 'job-hunter@localhost.test']);
+    assert.deepEqual([v.SMTP_HOST, v.SMTP_SECURE, v.SMTP_FROM, v.MAIL_REDIRECT_TO], ['127.0.0.1', 'off', '', 'test@localhost.test']);   // no placeholder sender is persisted; test mode is on
   } finally { sink.close(); await c.close(); }
 });
 
@@ -428,5 +428,44 @@ test('清除测试记录 keeps the postings the user already decided about', asy
     const r = (await c.call('POST', '/api/jobs/clear-test')).json; assert.deepEqual([r.ok, r.removed], [true, 1]);
     const jobs = (await c.call('GET', '/api/jobs')).json.jobs;
     assert.ok(!jobs.some((j) => j.id === a)); assert.equal(jobs.find((j) => j.id === b).status, 'dismissed');
+  } finally { await c.close(); }
+});
+
+test('the AI test checks what the run will do: the default model, one JSON-mode call, and plain hints for a pasted endpoint or a server without JSON mode', async () => {
+  const c = await boot();
+  const seen = []; const world = await startFakeWorld({ jobs: [], aiReply: (kind, user, sys) => { seen.push(user); return undefined; } });
+  try {
+    applyChanges(c.home, { AI_BASE_URL: `${world.base}/ai`, AI_API_KEY: SECRET });                 // no model: the run would use deepseek-chat
+    let r = (await c.call('POST', '/api/test', { what: 'ai' })).json; assert.equal(r.ok, false); assert.match(r.message, /deepseek-chat/);
+    applyChanges(c.home, { AI_MODEL: 'm' });
+    r = (await c.call('POST', '/api/test', { what: 'ai' })).json; assert.equal(r.ok, true, r.message); assert.match(r.message, /JSON/);
+    assert.ok(seen.length >= 1, 'a real chat call was made');
+    const f = (await c.call('GET', '/api/settings')).json.fields.find((x) => x.key === 'AI_JSON_MODE'); assert.equal(f.default, 'on');
+    // the full endpoint pasted as the base URL is reduced to the root
+    assert.equal((await c.call('PUT', '/api/settings', { changes: { AI_BASE_URL: `${world.base.replace('http://', 'https://')}/v1/chat/completions` } })).status, 200);
+    assert.equal((await c.call('GET', '/api/settings')).json.fields.find((x) => x.key === 'AI_BASE_URL').value, `${world.base.replace('http://', 'https://')}/v1`);
+    applyChanges(c.home, { AI_BASE_URL: `${world.base}/nowhere` });
+    r = (await c.call('POST', '/api/test', { what: 'ai' })).json; assert.equal(r.ok, false); assert.match(r.message, /404/);
+  } finally { await world.close(); await c.close(); }
+});
+
+test('a skipped posting can be rescued into 待投递, old to-dos can be dismissed in bulk, drafts are readable, and the page learns about the test mailbox and unreadable settings lines', async () => {
+  const c = await boot();
+  try {
+    const sk = '3'.repeat(16); c.ctx.appendEvent({ id: sk, status: 'skipped', title: 'S', score: 5, url: 'https://x.example/s' });
+    assert.equal((await c.call('POST', '/api/jobs/action', { id: sk, action: 'applied' })).status, 400);
+    assert.equal((await c.call('POST', '/api/jobs/action', { id: sk, action: 'reopen' })).json.status, 'manual');
+    const oldTs = new Date(Date.now() - 40 * 86400000).toISOString();
+    fs.appendFileSync(path.join(c.home, 'data', 'applications.jsonl'), `${JSON.stringify({ ts: oldTs, id: '4'.repeat(16), status: 'manual', title: 'Old', url: 'https://x.example/o' })}\n${JSON.stringify({ ts: new Date().toISOString(), id: '5'.repeat(16), status: 'manual', title: 'New', url: 'https://x.example/n', draft: true })}\n`);
+    fs.mkdirSync(path.join(c.home, 'data', 'drafts'), { recursive: true }); fs.writeFileSync(path.join(c.home, 'data', 'drafts', `2026-01-01-${'5'.repeat(16)}.txt`), 'To: hr@n.com\nSubject: 应聘\n\n正文');
+    assert.equal((await c.call('POST', '/api/jobs/dismiss-older', { days: 30 })).json.removed, 1);
+    const jobs = (await c.call('GET', '/api/jobs')).json.jobs;
+    assert.equal(jobs.find((j) => j.id === '4'.repeat(16)).status, 'dismissed'); assert.equal(jobs.find((j) => j.id === '5'.repeat(16)).hasDraft, true);
+    const m = (await c.call('GET', `/api/mail?id=${'5'.repeat(16)}`)).json; assert.deepEqual([m.ok, m.draft], [true, true]); assert.match(m.text, /正文/);
+    applyChanges(c.home, { SMTP_HOST: '127.0.0.1', SMTP_PORT: String(c.ctx.sinkPort), AUTO_SEND: 'off' });
+    fs.appendFileSync(path.join(c.home, 'config.local.env'), 'rm -rf /\n');
+    const st = (await c.call('GET', '/api/state')).json;
+    assert.deepEqual([st.test.sink.inUse, st.test.autoSendOff], [true, true]); assert.ok(st.configErrors.length === 1);
+    assert.match(st.checklist.find((i) => i.id === 'mail').detail, /自动发送已关闭/);
   } finally { await c.close(); }
 });

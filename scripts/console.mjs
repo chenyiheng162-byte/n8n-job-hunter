@@ -20,7 +20,8 @@ import { lockBusy, acquireLock } from './lib/lock.mjs';
 import { startSink, sinkCount } from './lib/sink.mjs';
 import { REGIONS, DEFAULT_REGION, searchLocation } from './lib/regions.mjs';
 import { sourceStatus } from './lib/sources.mjs';
-import { Store, loadNodemailer, makeTransport } from './hunt.mjs';
+import { Store, loadNodemailer, makeTransport, fromAddress, usesSink, sinkWithoutTestMode, isLocalHost } from './hunt.mjs';
+import { SINK_PORT } from './lib/constants.mjs';
 
 const here = path.dirname(fs.realpathSync(fileURLToPath(import.meta.url)));
 const UI_DIR = path.join(here, 'console');
@@ -31,7 +32,8 @@ const onoff = (v) => (/^(on|1|true|yes)$/i.test(v) ? 'on' : 'off');
 export const FIELDS = [
   { key: 'AI_BASE_URL', group: 'ai', label: '接口地址', type: 'url', placeholder: 'https://api.deepseek.com', help: '任意 OpenAI 兼容接口。本机模型可以用 http://127.0.0.1:端口。' },
   { key: 'AI_API_KEY', group: 'ai', label: 'API 密钥', type: 'text', secret: true, help: '只保存在这台电脑上，页面永远不会再显示它。' },
-  { key: 'AI_MODEL', group: 'ai', label: '模型', type: 'text', placeholder: 'deepseek-chat' },
+  { key: 'AI_MODEL', group: 'ai', label: '模型', type: 'text', placeholder: 'deepseek-chat', help: '不填就用 deepseek-chat。' },
+  { key: 'AI_JSON_MODE', group: 'ai', label: '要求接口按 JSON 格式回答（response_format）', type: 'bool', default: 'on', help: '绝大多数接口都支持；接口对此报 400 时再关掉。' },
   { key: 'JOB_KEYWORDS', group: 'sources', label: '搜索关键词', type: 'text', placeholder: '数据分析, 实习', help: '逗号分隔，每个关键词会单独搜一次。' },
   { key: 'JOB_REGION', group: 'sources', label: '目标地区（职位在哪里）', type: 'select', default: 'hk', options: ['hk', 'cn', 'tw', 'sg', 'jp', 'us', 'uk', 'ca', 'au', 'global'], labels: ['香港（默认）', '中国大陆', '台湾', '新加坡', '日本', '美国', '英国', '加拿大', '澳大利亚', '不限地区（只看可远程的岗位）'], help: '决定去哪里搜职位，也决定 AI 评分时哪些岗位算"在目标地区"。' },
   { key: 'JOB_LOCATION', group: 'sources', label: '更具体的地点（可选）', type: 'text', placeholder: 'Kowloon / Central', help: '比如香港的某个区；填了就用它搜索，留空用上面的地区。' },
@@ -103,7 +105,7 @@ export function validate(key, raw) {
   v = f.type === 'urls' ? v : v.trim();
   if (v === '') return ['', null];
   switch (f.type) {
-    case 'url': return /^https:\/\/\S+$/.test(v) || /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/\S*)?$/.test(v) ? [v.replace(/\/+$/, ''), null] : [null, '应以 https:// 开头（本机服务可用 http://127.0.0.1）'];
+    case 'url': { if (key === 'AI_BASE_URL') v = v.replace(/\/+$/, '').replace(/\/(chat\/completions|completions|models)$/i, ''); /* the full endpoint was pasted: keep the root (and a /v1) */ return /^https:\/\/\S+$/.test(v) || /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/\S*)?$/.test(v) ? [v.replace(/\/+$/, ''), null] : [null, '应以 https:// 开头（本机服务可用 http://127.0.0.1）']; }
     case 'urls': { const list = v.split(/\s+/).filter(Boolean); return list.every((u) => /^https?:\/\/\S+$/.test(u)) ? [[...new Set(list)].join(' '), null] : [null, '每个地址都应以 http:// 或 https:// 开头']; }
     case 'int': { if (!/^\d+$/.test(v)) return [null, '应为整数']; const n = Number(v); return n < f.min || n > f.max ? [null, `应在 ${f.min} 到 ${f.max} 之间`] : [String(n), null]; }
     case 'bool': return [onoff(v), null];
@@ -132,7 +134,7 @@ export function makeContext(opts = {}) {
     try { const st = fs.statSync(f); return { set: true, name: path.basename(f), size: st.size, exists: true }; } catch (e) { return { set: true, name: path.basename(f), exists: false }; }
   };
   const appendEvent = (ev) => { const d = path.join(home, 'data'); fs.mkdirSync(d, { recursive: true }); fs.appendFileSync(path.join(d, 'applications.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), ...ev })}\n`); };
-  const sinkPort = opts.sinkPort || 5725;
+  const sinkPort = opts.sinkPort || SINK_PORT;
   const lookup = opts.lookup || ((h) => dns.lookup(h, { all: true }));
   return { home, label, scriptsDir, sinkPort, lookup, fetchImpl: opts.fetchImpl || globalThis.fetch, profileFile, store, events, cfg, secrets, readProfile, resumeInfo, appendEvent, run: { proc: null, mode: '', startedAt: 0, lines: [], code: null }, env: opts.env || process.env, nodeBin: opts.nodeBin || process.execPath };
 }
@@ -142,12 +144,13 @@ const effective = (ctx) => ctx.cfg();
 const regionLabel = (code) => (REGIONS[code] || REGIONS[DEFAULT_REGION]).zh.replace(/（.*$/, '');
 function checklist(ctx) {
   const s = ctx.cfg(); const prof = validateProfile(ctx.readProfile()); const resume = ctx.resumeInfo(); const src = sourceStatus(s);
-  const smtpOk = !!(s.SMTP_HOST && (s.SMTP_FROM || s.SMTP_USER));
+  const smtpOk = !!(s.SMTP_HOST && fromAddress(s)) && s.AUTO_SEND !== 'off' && !sinkWithoutTestMode(s);
+  const mailDetail = s.AUTO_SEND === 'off' ? '自动发送已关闭（到「投递规则」里重新打开才会发邮件）' : sinkWithoutTestMode(s) ? '发信服务器还是本机测试邮箱，而测试模式已关闭：不会发出任何邮件，请填真实的 SMTP 服务器' : smtpOk ? `已设置${usesSink(s) ? '（本机测试邮箱，测试模式）' : ''}` : '不填也能用，但有邮箱的岗位只会列出来，不会自动发';
   return [
     { id: 'profile', label: '个人资料', ok: prof.length === 0, detail: prof.length ? `还差：${prof.map((p) => p.label).join('、')}` : '已填写', page: 'settings', anchor: 'profile' },
     { id: 'ai', label: 'AI 接口', ok: !!(s.AI_BASE_URL && s.AI_API_KEY), detail: !s.AI_BASE_URL ? '还没填接口地址' : !s.AI_API_KEY ? '还没填 API 密钥' : '已设置', page: 'settings', anchor: 'ai' },
-    { id: 'sources', label: '职位来源', ok: src.ok, detail: `地区：${regionLabel(s.JOB_REGION || DEFAULT_REGION)}。${src.ok ? `将使用：${src.usable.join('、')}` : '至少要一个来源：Jooble（要关键词）、RSS 或 Remotive'}${src.warnings.length ? `；${src.warnings[0]}` : ''}`, page: 'settings', anchor: 'sources' },
-    { id: 'mail', label: '发信邮箱', optional: true, ok: smtpOk, detail: smtpOk ? '已设置' : '不填也能用，但有邮箱的岗位只会列出来，不会自动发', page: 'settings', anchor: 'mail' },
+    { id: 'sources', label: '职位来源', ok: src.ok, detail: `地区：${regionLabel(s.JOB_REGION || DEFAULT_REGION)}。${src.ok ? `将使用：${src.usable.join('、')}` : '至少要一个来源：Jooble（要关键词）、RSS 或 Remotive'}${src.warnings.length ? `；${src.warnings[0]}` : ''}${!s.JOB_REGION && src.ok ? '；还没选目标地区（目前按香港搜索），请到「职位来源」里确认' : ''}`, page: 'settings', anchor: 'sources' },
+    { id: 'mail', label: '发信邮箱', optional: true, ok: smtpOk, detail: mailDetail, page: 'settings', anchor: s.AUTO_SEND === 'off' ? 'rules' : 'mail' },
     { id: 'resume', label: '简历 PDF', optional: true, ok: resume.set && resume.exists, detail: resume.set ? (resume.exists ? resume.name : '文件找不到了，请重新上传') : '随投递邮件一起发出，不上传就不会自动发邮件', page: 'settings', anchor: 'mail' },
   ];
 }
@@ -171,7 +174,7 @@ function jobsView(ctx) {
     merged.set(e.id, { ...prev, ...Object.fromEntries(Object.entries(e).filter(([, v]) => v !== undefined)) });
   }
   const rawLogo = new Map(); for (const j of merged.values()) if (httpOnly(j.logo)) rawLogo.set(j.id, j.logo);
-  const jobs = [...merged.values()].map((j) => ({ id: j.id, title: j.title || '', company: j.company || '', location: j.location || '', url: /^https?:\/\//.test(j.url || '') ? j.url : '', source: j.source || '', score: j.score ?? null, reason: j.reason || '', status: j.status, group: STATUS_GROUP[j.status] || 'other', to: j.to || '', intendedTo: j.intendedTo || '', redirected: !!j.redirected, subject: j.subject || '', note: j.note || '', ts: j.ts, salary: j.salary || '', jobType: j.jobType || '', tags: Array.isArray(j.tags) ? j.tags.slice(0, 6) : [], category: j.category || '', hasLogo: rawLogo.has(j.id), postedAt: j.postedAt || 0, summary: j.summary || '', highlights: Array.isArray(j.highlights) ? j.highlights.slice(0, 3) : [], concerns: Array.isArray(j.concerns) ? j.concerns.slice(0, 2) : [], applyUrl: httpOnly(j.applyUrl), contactSource: j.contactSource || '', hasDesc: !!j.desc }));
+  const jobs = [...merged.values()].map((j) => ({ id: j.id, title: j.title || '', company: j.company || '', location: j.location || '', url: /^https?:\/\//.test(j.url || '') ? j.url : '', source: j.source || '', score: j.score ?? null, reason: j.reason || '', status: j.status, group: STATUS_GROUP[j.status] || 'other', to: j.to || '', intendedTo: j.intendedTo || '', redirected: !!j.redirected, subject: j.subject || '', note: j.note || '', ts: j.ts, salary: j.salary || '', jobType: j.jobType || '', tags: Array.isArray(j.tags) ? j.tags.slice(0, 6) : [], category: j.category || '', hasLogo: rawLogo.has(j.id), postedAt: j.postedAt || 0, summary: j.summary || '', highlights: Array.isArray(j.highlights) ? j.highlights.slice(0, 3) : [], concerns: Array.isArray(j.concerns) ? j.concerns.slice(0, 2) : [], applyUrl: httpOnly(j.applyUrl), contactSource: j.contactSource || '', hasDesc: !!j.desc, hasDraft: !!j.draft }));
   jobs.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
   const counts = { todo: 0, sent: 0, attention: 0, done: 0, skipped: 0 };
   for (const j of jobs) if (counts[j.group] !== undefined) counts[j.group] += 1;
@@ -185,14 +188,20 @@ async function testAi(ctx) {
   const base = s.AI_BASE_URL.replace(/\/+$/, ''); const headers = { Authorization: `Bearer ${s.AI_API_KEY}` };
   try {
     const m = await fetchJson(`${base}/models`, { headers });
+    const model = s.AI_MODEL || 'deepseek-chat';   // exactly what the run will use
     if (m.ok && m.json && Array.isArray(m.json.data)) {
       const ids = m.json.data.map((x) => x.id);
-      if (s.AI_MODEL && !ids.includes(s.AI_MODEL)) return { ok: false, message: `连接成功，但没有模型 "${s.AI_MODEL}"。可用的有：${ids.slice(0, 8).join('、')}` };
-      return { ok: true, message: `连接成功${s.AI_MODEL ? `，模型 ${s.AI_MODEL} 可用` : `，共 ${ids.length} 个模型`}` };
-    }
-    if (m.status === 401 || m.status === 403) return { ok: false, message: '密钥不对或没有权限（401/403）' };
-    const c = await fetchJson(`${base}/chat/completions`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: s.AI_MODEL || 'deepseek-chat', max_tokens: 5, messages: [{ role: 'user', content: 'Reply with OK.' }] }) });
-    return c.ok ? { ok: true, message: '连接成功' } : { ok: false, message: `接口返回 ${c.status}：${redactAll(c.text.slice(0, 120), ctx.secrets())}` };
+      if (ids.length && !ids.includes(model)) return { ok: false, message: `连接成功，但没有模型 "${model}"${s.AI_MODEL ? '' : '（没填模型时就用它）'}。可用的有：${ids.slice(0, 8).join('、')}` };
+    } else if (m.status === 401 || m.status === 403) return { ok: false, message: '密钥不对或没有权限（401/403）' };
+    // one real call shaped like the run's (JSON mode included), so a server that rejects response_format fails HERE, not tomorrow
+    const body = { model, temperature: 0, max_tokens: 20, messages: [{ role: 'system', content: '只输出 JSON。' }, { role: 'user', content: '请只回复 {"ok": true}' }] };
+    if (s.AI_JSON_MODE !== 'off') body.response_format = { type: 'json_object' };
+    const c = await fetchJson(`${base}/chat/completions`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (c.ok) { const t = c.json && c.json.choices && c.json.choices[0] && c.json.choices[0].message && c.json.choices[0].message.content; const a = String(t || '').indexOf('{'); let parsed = null; try { parsed = JSON.parse(String(t).slice(a, String(t).lastIndexOf('}') + 1)); } catch (e) { /* no json */ }
+      return parsed ? { ok: true, message: `连接成功，模型 ${model} 可用，会按 JSON 回答` } : { ok: false, message: `模型 ${model} 能连上，但回答里没有 JSON（评分和写信都需要 JSON）：${redactAll(String(t || '').slice(0, 80), ctx.secrets())}` }; }
+    if (c.status === 404) return { ok: false, message: `接口返回 404：接口地址应只填到根路径（例如 https://api.deepseek.com，不带 /chat/completions），或者模型名 "${model}" 不存在` };
+    if (c.status === 400 && /response_format|json_object/i.test(c.text)) return { ok: false, message: '接口不支持 response_format（JSON 模式）：把「要求接口按 JSON 格式回答」关掉再试' };
+    return { ok: false, message: `接口返回 ${c.status}：${redactAll(c.text.slice(0, 120), ctx.secrets())}` };
   } catch (e) { return { ok: false, message: `连不上：${redactAll(e.message, ctx.secrets())}` }; }
 }
 async function testJobs(ctx) {
@@ -233,7 +242,8 @@ async function testMail(ctx) {
   const req = loadNodemailer(ctx.env, ctx.home); if (!req) return { ok: false, message: '找不到 nodemailer' };
   const resume = ctx.resumeInfo();
   try {
-    await makeTransport(s, req).sendMail({ from: s.MAIL_FROM_NAME || prof.name ? { name: s.MAIL_FROM_NAME || prof.name, address: s.SMTP_FROM || s.SMTP_USER } : (s.SMTP_FROM || s.SMTP_USER), to, subject: '【求职助手】测试邮件', text: '这是求职助手发给你自己的测试邮件。\n收到它，说明发信设置正常；如果带着简历附件，说明简历也正常。', ...(resume.exists ? { attachments: [{ filename: resume.name, path: s.RESUME_FILE }] } : {}) });
+    await makeTransport(s, req).sendMail({ from: s.MAIL_FROM_NAME || prof.name ? { name: s.MAIL_FROM_NAME || prof.name, address: fromAddress(s) } : fromAddress(s), to, subject: '【求职助手】测试邮件', text: '这是求职助手发给你自己的测试邮件。\n收到它，说明发信设置正常；如果带着简历附件，说明简历也正常。', ...(resume.exists ? { attachments: [{ filename: resume.name, path: s.RESUME_FILE }] } : {}) });
+    if (isLocalHost(s.SMTP_HOST)) return { ok: true, message: `发信链路正常：邮件已存入本机测试邮箱（${path.join(ctx.home, 'data', 'sink')}），没有发到任何真实邮箱${resume.exists ? '，带简历附件' : ''}` };
     return { ok: true, message: `已发给 ${to}${resume.exists ? '（带简历附件）' : '（没有简历附件）'}，请去收件箱看看` };
   } catch (e) { return { ok: false, message: redactAll(`发送失败：${e.code || ''} ${e.message}`, ctx.secrets()) }; }
 }
@@ -264,7 +274,8 @@ export function createApi(ctx) {
       let last = null; try { last = JSON.parse(fs.readFileSync(path.join(ctx.home, 'data', 'state', 'last-run.json'), 'utf8')); } catch (e) { /* none */ }
       const items = checklist(ctx);
       const required = items.filter((i) => !i.optional);
-      return { ready: required.every((i) => i.ok), checklist: items, schedule: scheduleInfo(ctx), lastRun: last, counts, test: { redirect: ctx.cfg().MAIL_REDIRECT_TO || '', sink: { port: ctx.sinkPort, count: sinkCount(path.join(ctx.home, 'data', 'sink')) } }, doneToday: fs.existsSync(path.join(ctx.home, 'data', 'state', `done-${today}`)), running: !!ctx.run.proc || lockBusy(ctx.home) };
+      const s = ctx.cfg();
+      return { ready: required.every((i) => i.ok), checklist: items, schedule: scheduleInfo(ctx), lastRun: last, counts, test: { redirect: s.MAIL_REDIRECT_TO || '', sink: { port: ctx.sinkPort, count: sinkCount(path.join(ctx.home, 'data', 'sink')), inUse: usesSink(s) }, autoSendOff: s.AUTO_SEND === 'off' }, configErrors: loadConfig(ctx.home).errors, doneToday: fs.existsSync(path.join(ctx.home, 'data', 'state', `done-${today}`)), running: !!ctx.run.proc || lockBusy(ctx.home) };
     },
     'GET /api/jobs': () => { const { jobs, counts } = jobsView(ctx); return { jobs, counts }; },
     'GET /api/job': ({ query }) => {
@@ -306,6 +317,8 @@ export function createApi(ctx) {
         if (err) errors[k] = err; else out[k] = val === '' ? null : val;
       }
       if (Object.keys(errors).length) return { status: 400, body: { ok: false, errors } };
+      const cur = ctx.cfg();
+      if (out.SMTP_HOST && !isLocalHost(out.SMTP_HOST) && cur.SMTP_FROM === 'job-hunter@localhost.test' && out.SMTP_FROM === undefined) out.SMTP_FROM = null;   // the test mailbox's placeholder sender
       applyChanges(ctx.home, out);
       return { ok: true };
     },
@@ -334,11 +347,20 @@ export function createApi(ctx) {
       if (!status) return { status: 400, body: { ok: false, message: '无效的操作' } };
       const job = jobsView(ctx).jobs.find((j) => j.id === id);
       if (!job) return { status: 404, body: { ok: false, message: '找不到这个岗位' } };
-      if (['skipped', 'sent'].includes(job.status)) return { status: 400, body: { ok: false, message: '这个状态不能改' } };
-      // "put back" means back to what it was before the user marked it (unknown/failed stay what they were); manual when nothing is known
-      const before = action === 'reopen' ? [...ctx.events()].reverse().find((e) => e.id === id && e.status && !['applied', 'dismissed'].includes(e.status)) : null;
-      ctx.appendEvent({ id, status: before ? before.status : status, note: undefined });
-      return { ok: true, status: before ? before.status : status };
+      if (job.status === 'sent' || (job.status === 'skipped' && action !== 'reopen')) return { status: 400, body: { ok: false, message: '这个状态不能改' } };
+      // "put back" means back to what it was before the user marked it (unknown/failed stay what they were); a skipped posting
+      // the user rescues, or one with no earlier status, becomes a to-do
+      const before = action === 'reopen' && job.status !== 'skipped' ? [...ctx.events()].reverse().find((e) => e.id === id && e.status && !['applied', 'dismissed'].includes(e.status)) : null;
+      const next = before && before.status !== 'skipped' ? before.status : status;
+      ctx.appendEvent({ id, status: next, note: undefined });
+      return { ok: true, status: next };
+    },
+    'POST /api/jobs/dismiss-older': ({ body }) => {
+      const days = Number(body && body.days); if (!Number.isFinite(days) || days < 1 || days > 3650) return { status: 400, body: { ok: false, message: '天数不对' } };
+      const cut = Date.now() - days * 86400000;
+      const old = jobsView(ctx).jobs.filter((j) => j.status === 'manual' && Date.parse(j.ts) < cut);
+      for (const j of old) ctx.appendEvent({ id: j.id, status: 'dismissed' });
+      return { ok: true, removed: old.length };
     },
     'POST /api/jobs/clear-test': async () => {
       // Forget everything that was only a test send (so those postings can be handled for real later). Rewrites the log,
@@ -361,15 +383,18 @@ export function createApi(ctx) {
       const cur = ctx.cfg();
       // The saved account and password stay (the test mailbox accepts any login). Test mode is switched on with it: a run through
       // the sink must leave "test send" records (clearable, no cooldown), never "sent to hr@company.com" ones.
-      applyChanges(ctx.home, { SMTP_HOST: '127.0.0.1', SMTP_PORT: String(ctx.sinkPort), SMTP_SECURE: 'off', SMTP_FROM: cur.SMTP_FROM || 'job-hunter@localhost.test', MAIL_REDIRECT_TO: cur.MAIL_REDIRECT_TO || 'test@localhost.test' });
+      applyChanges(ctx.home, { SMTP_HOST: '127.0.0.1', SMTP_PORT: String(ctx.sinkPort), SMTP_SECURE: 'off', MAIL_REDIRECT_TO: cur.MAIL_REDIRECT_TO || 'test@localhost.test' });   // (no placeholder From is persisted: fromAddress() supplies one for the local mailbox)
       return { ok: true, redirect: cur.MAIL_REDIRECT_TO || 'test@localhost.test' };
     },
     'GET /api/mail': ({ query }) => {
       const id = query.get('id') || '';
       if (!/^[0-9a-f]{16}$/.test(id)) return { status: 400, body: { ok: false } };
-      const dir = path.join(ctx.home, 'data', 'sent'); let f = null;
-      try { f = fs.readdirSync(dir).filter((x) => x.endsWith(`-${id}.txt`)).sort().pop(); } catch (e) { /* none */ }
-      return f ? { ok: true, text: fs.readFileSync(path.join(dir, f), 'utf8') } : { status: 404, body: { ok: false, message: '没有找到邮件原文' } };
+      for (const sub of ['sent', 'drafts']) {   // what was sent, else the letter written for a posting that was only listed
+        const dir = path.join(ctx.home, 'data', sub); let f = null;
+        try { f = fs.readdirSync(dir).filter((x) => x.endsWith(`-${id}.txt`)).sort().pop(); } catch (e) { /* none */ }
+        if (f) return { ok: true, text: fs.readFileSync(path.join(dir, f), 'utf8'), draft: sub === 'drafts' };
+      }
+      return { status: 404, body: { ok: false, message: '没有找到邮件原文' } };
     },
     'POST /api/run': ({ body }) => { const mode = body && body.mode === 'dry' ? 'dry' : body && body.mode === 'real' ? 'real' : ''; if (!mode) return { status: 400, body: { ok: false } }; const r = startRun(ctx, mode); return r.ok ? r : { status: 409, body: r }; },
     'GET /api/run': () => { const r = ctx.run; const external = !r.proc && lockBusy(ctx.home); return { running: !!r.proc || external, external, mode: r.mode, startedAt: r.startedAt, code: r.code, lines: r.lines.slice(-200) }; },

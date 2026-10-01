@@ -14,7 +14,7 @@ set -euo pipefail
 umask 077   # everything this script creates is private to the current user
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
-[ -x "$SRC/scripts/schedule.sh" ] || chmod u+x "$SRC"/*.sh "$SRC"/scripts/*.sh "$SRC"/scripts/jobhunt 2>/dev/null || true   # some ways of copying a zip lose the executable bit
+[ -x "$SRC/scripts/schedule.sh" ] || chmod u+x "$SRC"/*.sh "$SRC"/*.command "$SRC"/scripts/*.sh "$SRC"/scripts/jobhunt 2>/dev/null || true   # some ways of copying a zip lose the executable bit
 HOME_DIR="${JOBHUNT_HOME:-$HOME/.n8n-job-hunter}"
 NODE_VERSION="v24.21.0"   # n8n 2.x needs Node >= 24
 # SHA-256 of the official tarballs, pinned here so the download is not trusted just because it matches a checksum file from the
@@ -114,7 +114,7 @@ if [ "$CONSOLE" = 1 ] && [ "$NOSCHED" != 1 ]; then
   cat <<MSG
 马上会在浏览器里打开「求职助手控制台」：按总览页的清单填个人资料、AI、职位来源（大约 5 分钟）。
 - 浏览器没有自动打开的话，把下面出现的那条 http://127.0.0.1 开头的链接复制到浏览器里。
-- 填完可以关掉这个终端窗口，每天 ${TIME} 的自动运行不受影响。以后想再打开控制台，在终端运行：
+- 填完可以关掉这个终端窗口，每天 ${TIME} 的自动运行不受影响。以后想再打开控制台：双击 ${SRC}/打开控制台.command，或在终端运行：
     ${HOME_DIR}/scripts/jobhunt console
 - 建议：让 Mac 在运行前 5 分钟自动唤醒（需要管理员密码，请你自己运行；先用 pmset -g sched 看看有没有别的定时设置）：
     sudo pmset repeat wakeorpoweron MTWRFSU ${WAKE}

@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/chenyiheng162-byte/n8n-job-hunter/m
 ## 控制台
 
 ```bash
-~/.n8n-job-hunter/scripts/jobhunt console      # 在浏览器里打开（只在这台电脑上有效）
+~/.n8n-job-hunter/scripts/jobhunt console      # 在浏览器里打开（只在这台电脑上有效）；或双击项目里的「打开控制台.command」
 ```
 
 | 页面 | 作用 |
@@ -89,7 +89,7 @@ curl -fsSL https://raw.githubusercontent.com/chenyiheng162-byte/n8n-job-hunter/m
 
 | 路径 | 内容 |
 |---|---|
-| `install.sh` / `get.sh` / `uninstall.sh` | 安装 / 一行命令入口 / 卸载 |
+| `install.sh` / `get.sh` / `uninstall.sh` | 安装 / 一行命令入口 / 卸载；`双击安装.command`、`打开控制台.command` 是给不用终端的人的 |
 | `workflows/src/*.js` | n8n 工作流的各阶段代码（`lib/common.js` 被所有阶段共享）；`job-hunter.json` 和 `BUILD` 由 `scripts/build-workflow.mjs` 生成，BUILD 是整个工作流的哈希，运行时核对，n8n 里是旧版本就拒绝运行 |
 | `scripts/hunt.mjs` | 每日运行器：预检、跑工作流、发送、记账、报告 |
 | `scripts/console.mjs`、`scripts/console/` | 本机网页控制台（服务端 + 页面） |

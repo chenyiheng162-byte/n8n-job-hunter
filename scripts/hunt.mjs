@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, homeDir, KEYS, SECRET_KEYS } from './lib/config.mjs';
 import { acquireLock } from './lib/lock.mjs';
 import { sourceStatus } from './lib/sources.mjs';
+import { SINK_PORT } from './lib/constants.mjs';
 import { loadNodemailer as runtimeLoadNodemailer } from './lib/runtime.mjs';
 import { parseProfile, validateProfile } from './lib/profile.mjs';
 import { runDirect, runN8n, makeHttp, pruneExecutions } from './engine.mjs';
@@ -34,6 +35,12 @@ const redact = (s, secrets = []) => {
 };
 
 // ------------------------------------------------------------------ settings
+export const isLocalHost = (h) => /^(127\.0\.0\.1|localhost|::1)$/i.test(String(h || ''));
+// the console's local test mailbox: mail "sent" there is a file on this computer, so it is only ever a test
+export const usesSink = (s) => isLocalHost(s.SMTP_HOST) && Number(s.SMTP_PORT || 465) === SINK_PORT;
+export const sinkWithoutTestMode = (s) => usesSink(s) && !s.MAIL_REDIRECT_TO;
+// the From address: SMTP_FROM, else the login, else (only for the local test mailbox) a placeholder that is never persisted
+export const fromAddress = (s) => s.SMTP_FROM || s.SMTP_USER || (isLocalHost(s.SMTP_HOST) ? 'job-hunter@localhost.test' : '');
 export function resolveSettings(env = process.env) {
   const home = homeDir(env);
   const cfg = loadConfig(home);
@@ -54,7 +61,8 @@ export function preflight({ s, profileFile, cfg }, { forSending = true } = {}) {
   else warnings.push(...src.warnings);
   if (s.MAIL_REDIRECT_TO) warnings.push(`测试模式已开启：所有投递邮件都会改发到 ${s.MAIL_REDIRECT_TO}，真正的收件人不会收到任何东西`);
   if (forSending && s.AUTO_SEND !== 'off') {
-    if (!s.SMTP_HOST || !(s.SMTP_FROM || s.SMTP_USER)) warnings.push('没有配置发信邮箱（SMTP_*）：有邮箱的岗位只会写好信，列出来让你自己发');
+    if (!s.SMTP_HOST || !fromAddress(s)) warnings.push('没有配置发信邮箱（SMTP_*）：有邮箱的岗位只会写好信，列出来让你自己发');
+    else if (sinkWithoutTestMode(s)) warnings.push('发信服务器还是本机测试邮箱，但测试模式已关闭：不会发出任何邮件，所有岗位只列出。要正式投递请在「发信邮箱」里填真实的 SMTP 服务器');
     else if (!s.RESUME_FILE) warnings.push('没有配置 RESUME_FILE：不带简历的投递没有意义，所有岗位只会列出来');
     else { try { fs.accessSync(s.RESUME_FILE, fs.constants.R_OK); } catch (e) { warnings.push(`读不到简历文件 ${s.RESUME_FILE}：所有岗位只会列出来`); } }
   }
@@ -69,8 +77,10 @@ export class Store {
   constructor(home, { dryRun = false } = {}) {
     this.dir = path.join(home, 'data'); this.file = path.join(this.dir, 'applications.jsonl'); this.dryRun = dryRun;
     this.stateDir = path.join(this.dir, 'state'); this.reports = path.join(this.dir, 'reports');
-    if (!dryRun) for (const d of [this.dir, this.stateDir, this.reports, path.join(this.dir, 'sent')]) fs.mkdirSync(d, { recursive: true });
+    if (!dryRun) for (const d of [this.dir, this.stateDir, this.reports, path.join(this.dir, 'sent'), path.join(this.dir, 'drafts')]) fs.mkdirSync(d, { recursive: true });
   }
+  // the letter written for a posting that was listed instead of sent, so the user can read and use it
+  saveDraft(it) { if (this.dryRun || !it.body) return false; try { fs.writeFileSync(path.join(this.dir, 'drafts', `${today()}-${it.id}.txt`), `To: ${it.to || ''}\nSubject: ${it.subject || ''}\n\n${it.body}\n`); return true; } catch (e) { return false; } }
   events() {
     let t = ''; try { t = fs.readFileSync(this.file, 'utf8'); } catch (e) { /* none yet */ }
     return t.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
@@ -128,7 +138,7 @@ export function makeMailer(s, req) {
 
 export async function act({ plan, store, ctx, send, log = () => {} }) {
   const { s, num, fromName, replyTo } = ctx;
-  const out = { sent: [], listed: [], skipped: [], attention: [] };
+  const out = { sent: [], listed: [], skipped: [], attention: [], deferred: [] };
   const cap = num('MAX_APPLICATIONS_PER_DAY', 10);
   const cooldownMs = num('RECIPIENT_COOLDOWN_DAYS', 30) * 86400000;
   const canSend = s.AUTO_SEND !== 'off' && !!send && !ctx.dryRun && cap > 0; // a cap of 0 is a pause: listed once, like AUTO_SEND=off (not deferred and re-scored every day)
@@ -137,7 +147,7 @@ export async function act({ plan, store, ctx, send, log = () => {} }) {
   // what the console shows on a card: kept in the event so the page needs nothing else (the long description only for postings the user may act on)
   const lean = (it) => ({ id: it.id, title: it.title, company: it.company, location: it.location, url: it.url, source: it.source, score: it.score, reason: it.reason });
   const base = (it) => ({ ...lean(it), salary: it.salary || undefined, jobType: it.jobType || undefined, tags: it.tags && it.tags.length ? it.tags : undefined, category: it.category || undefined, logo: it.logo || undefined, postedAt: it.postedAt || undefined, summary: it.summary || undefined, highlights: it.highlights && it.highlights.length ? it.highlights : undefined, concerns: it.concerns && it.concerns.length ? it.concerns : undefined, applyUrl: it.applyUrl || undefined, desc: it.desc || undefined, contactSource: it.contactSource || undefined });
-  const manual = (it, note) => { out.listed.push({ ...it, note: note || it.note }); store.record({ ...base(it), status: 'manual', to: it.to || undefined, note: note || it.note || undefined }); };
+  const manual = (it, note) => { const draft = store.saveDraft(it); out.listed.push({ ...it, note: note || it.note }); store.record({ ...base(it), status: 'manual', to: it.to || undefined, note: note || it.note || undefined, draft: draft || undefined }); };
 
   for (const it of plan.items) {
     if (it.route === 'skip') { out.skipped.push(it); store.record({ ...lean(it), status: 'skipped' }); continue; }
@@ -149,9 +159,9 @@ export async function act({ plan, store, ctx, send, log = () => {} }) {
     const redirect = (s.MAIL_REDIRECT_TO || '').toLowerCase();
     const to = redirect || intended;
     const extra = redirect ? { intendedTo: intended, redirected: true } : {};
-    if (!canSend) { manual(it, ctx.dryRun ? '（试运行：没有发送）' : cap <= 0 && send && s.AUTO_SEND !== 'off' ? '邮件已写好但没有发送（每日上限设为 0）' : '邮件已写好但没有发送（未开启自动投递或没配好发信邮箱）'); continue; }
+    if (!canSend) { manual(it, ctx.dryRun ? '（试运行：没有发送）' : cap <= 0 && send && s.AUTO_SEND !== 'off' ? '邮件已写好但没有发送（每日上限设为 0）' : sinkWithoutTestMode(s) ? '邮件已写好但没有发送（发信服务器还是本机测试邮箱，测试模式又已关闭）' : s.AUTO_SEND === 'off' ? '邮件已写好但没有发送（自动发送已关闭）' : '邮件已写好但没有发送（没配好发信邮箱或简历）'); continue; }
     if (used.has(intended) || (!redirect && Date.now() - store.lastContact(intended) < cooldownMs)) { manual(it, `近期已给 ${intended} 发过邮件，这次改为列出，请自己决定`); continue; }
-    if (count >= cap) { out.attention.push({ ...it, note: `今天已达每日上限 ${cap} 封，留到明天（不记录，明天会重新评估）` }); continue; }
+    if (count >= cap) { out.deferred.push({ ...it, note: `今天已达每日上限 ${cap} 封，留到明天（不记录，明天会重新评估）` }); continue; }
 
     used.add(intended); count += 1;
     const subject = redirect ? `【测试】${it.subject}` : it.subject;
@@ -160,7 +170,7 @@ export async function act({ plan, store, ctx, send, log = () => {} }) {
       : it.body;
     store.record({ ...base(it), status: 'sending', to, subject, ...extra }); // written BEFORE the attempt: a crash leaves "unknown", never a resend
     const r = await send({
-      from: fromName ? { name: fromName, address: s.SMTP_FROM || s.SMTP_USER } : (s.SMTP_FROM || s.SMTP_USER), to, subject, text,
+      from: fromName ? { name: fromName, address: fromAddress(s) } : fromAddress(s), to, subject, text,
       ...(replyTo ? { replyTo } : {}), attachments: [{ filename: path.basename(s.RESUME_FILE), path: s.RESUME_FILE }],
     });
     log(`mail to ${to}${redirect ? ` (test mode; meant for ${intended})` : ''}: ${r.status}`);
@@ -200,7 +210,8 @@ export function renderReport({ plan, result, date, dryRun, warnings }) {
   const L = [];
   const job = (it) => `${it.company ? `${it.company} · ` : ''}${it.title}`;
   L.push(`# 求职日报 ${date}${dryRun ? '（试运行，没有发送任何邮件）' : ''}`, '');
-  L.push(`新岗位 ${plan.fetched} 个 · 评分合格 ${plan.items.filter((i) => i.route !== 'skip').length} · **已邮件投递 ${result.sent.length}** · **需要你自己投递 ${result.listed.length}** · 不合适 ${result.skipped.length}${result.attention.length ? ` · 需留意 ${result.attention.length}` : ''}`, '');
+  const deferred = result.deferred || [];
+  L.push(`新岗位 ${plan.fetched} 个 · 评分合格 ${plan.items.filter((i) => i.route !== 'skip').length} · **已邮件投递 ${result.sent.length}** · **需要你自己投递 ${result.listed.length}** · 不合适 ${result.skipped.length}${deferred.length ? ` · 留到明天 ${deferred.length}` : ''}${result.attention.length ? ` · 需留意 ${result.attention.length}` : ''}`, '');
   if (result.sent.length) { L.push('## ✅ 已邮件投递'); for (const it of result.sent) L.push(`- ${job(it)}（${it.score} 分）→ ${it.intendedTo ? `${it.intendedTo}（测试模式：实际发到 ${it.to}）` : it.to}`); L.push(''); }
   if (result.listed.length) {
     L.push('## 📝 需要你自己投递（点链接去投递网站）');
@@ -208,6 +219,7 @@ export function renderReport({ plan, result, date, dryRun, warnings }) {
     L.push('');
   }
   if (result.attention.length) { L.push('## ⚠️ 需要留意'); for (const it of result.attention) L.push(`- ${job(it)} → ${it.to || ''}：${it.note}`); L.push(''); }
+  if (deferred.length) { L.push('## ⏭ 留到明天（今天已达每日上限，明天重新评估）'); for (const it of deferred) L.push(`- ${job(it)} → ${it.to || ''}`); L.push(''); }
   const warn = [...(plan.warnings || []), ...(warnings || [])];
   if (result.sent.some((i) => i.intendedTo)) warn.unshift('测试模式：投递邮件都被重定向到了测试邮箱，真正的收件人没有收到任何东西');
   if (plan.overflow) warn.push(`还有 ${plan.overflow} 个新岗位超出每次处理上限，明天继续`);
@@ -295,7 +307,7 @@ export async function runHunt({ env = process.env, args = [], fetchImpl = global
     // sending
     let sender = send;
     const warnings = pf.warnings.map((w) => redact(w, secrets));
-    const wantSend = st.s.AUTO_SEND !== 'off' && st.s.SMTP_HOST && (st.s.SMTP_FROM || st.s.SMTP_USER) && st.s.RESUME_FILE && fs.existsSync(st.s.RESUME_FILE);
+    const wantSend = st.s.AUTO_SEND !== 'off' && st.s.SMTP_HOST && fromAddress(st.s) && !sinkWithoutTestMode(st.s) && st.s.RESUME_FILE && fs.existsSync(st.s.RESUME_FILE);
     if (!sender && wantSend && !dryRun) {
       const req = loadNodemailer(env, st.home);
       if (req) sender = makeMailer(st.s, req); else warnings.push('找不到 nodemailer，无法发邮件（有邮箱的岗位只列出）');
@@ -310,8 +322,9 @@ export async function runHunt({ env = process.env, args = [], fetchImpl = global
       fs.writeFileSync(path.join(store.reports, `${date}.md`), `${report}\n`);
       writeTodoCsv(store);
       store.set(`done-${date}`);
-      lastRun({ result: 'ok', engine: direct ? 'direct' : 'n8n', sent: acted.sent.length, listed: acted.listed.length, skipped: acted.skipped.length, attention: acted.attention.length, fetched: plan.fetched, warnings: (plan.warnings || []).length + warnings.length });
-      const head = `已投递 ${acted.sent.length} · 待你投递 ${acted.listed.length}${acted.attention.length ? ` · 需留意 ${acted.attention.length}` : ''}`;
+      const testMode = !!st.s.MAIL_REDIRECT_TO;
+      lastRun({ result: 'ok', engine: direct ? 'direct' : 'n8n', sent: acted.sent.length, listed: acted.listed.length, skipped: acted.skipped.length, attention: acted.attention.length, deferred: acted.deferred.length, fetched: plan.fetched, warnings: (plan.warnings || []).length + warnings.length, testMode });
+      const head = `${testMode ? '【测试模式，没有真正发出】' : ''}已投递 ${acted.sent.length} · 待你投递 ${acted.listed.length}${acted.deferred.length ? ` · 留到明天 ${acted.deferred.length}` : ''}${acted.attention.length ? ` · 需留意 ${acted.attention.length}` : ''}`;
       notifier('求职日报', head);
       if (st.s.DISCORD_WEBHOOK_URL) await postDiscord(st.s.DISCORD_WEBHOOK_URL, report, fetchImpl);
     }

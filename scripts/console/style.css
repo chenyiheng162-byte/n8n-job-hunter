@@ -109,7 +109,7 @@ pre.log { background: var(--bg); border: 1px solid var(--line); border-radius: v
 .chip { font-size: 12px; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--fg-2); }
 .chip.src { color: var(--info); background: var(--info-soft); border-color: transparent; } .chip.faint { color: var(--faint); border-color: transparent; background: none; padding-left: 0; }
 .chip.good { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); } .chip.care { color: var(--warn); background: var(--warn-soft); border-color: var(--warn-line); }
-.how { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); } .how > span:first-child { display: inline-flex; gap: 5px; align-items: center; overflow-wrap: anywhere; }
+.how { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); } .how .hint { flex-basis: 100%; color: var(--fg-2); } .how > span:first-child { display: inline-flex; gap: 5px; align-items: center; overflow-wrap: anywhere; }
 .jfoot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 4px; } .jfoot .faint { margin-left: auto; }
 .ring-wrap { width: 54px; height: 54px; } .ring { width: 54px; height: 54px; }
 .ring-track { fill: none; stroke: var(--line); stroke-width: 4; } .ring-bar { fill: none; stroke-width: 4; stroke-linecap: round; stroke: var(--warn); }

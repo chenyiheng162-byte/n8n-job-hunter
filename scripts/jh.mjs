@@ -13,6 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { homeDir, loadConfig, setConfig, KEYS, SECRET } from './lib/config.mjs';
 import { resolveSettings, preflight, Store, runHunt } from './hunt.mjs';
+import { validate, FIELDS } from './console.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const [cmd, ...rest] = process.argv.slice(2);
@@ -48,8 +49,13 @@ if (cmd === 'console') {
     const r = spawnSync('bash', [path.join(here, 'schedule.sh'), v.trim()], { stdio: 'inherit', env: { ...process.env, JOBHUNT_HOME: home } });
     process.exit(r.status ?? 1);
   }
-  setConfig(home, rest[1], v.trim());
-  console.log(`${rest[1]} 已保存`);
+  // the same checks as the console's settings page (a value the run would silently ignore is refused here)
+  let val = v.trim();
+  if (FIELDS.some((f) => f.key === rest[1])) { const [ok, err] = validate(rest[1], val); if (err) { console.error(`${rest[1]}：${err}`); process.exit(1); } val = ok; }
+  else if (rest[1] === 'AI_JSON_MODE') val = val === '' ? '' : (/^(on|1|true|yes)$/i.test(val) ? 'on' : 'off');
+  else if (['AI_DELAY_MS', 'MAIL_MAX_CHARS'].includes(rest[1]) && val && !/^\d+$/.test(val)) { console.error(`${rest[1]}：应为整数`); process.exit(1); }
+  setConfig(home, rest[1], val);
+  console.log(val === '' ? `${rest[1]} 已清除` : `${rest[1]} 已保存`);
 } else if (cmd === 'status') {
   const st = resolveSettings(); const store = new Store(home, { dryRun: true });
   const pf = preflight(st);

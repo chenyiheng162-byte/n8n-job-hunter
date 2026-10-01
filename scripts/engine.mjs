@@ -10,7 +10,7 @@ import { WORKFLOW_ID } from './lib/constants.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-export const STAGES = [['Fetch jobs', 'fetch-jobs.js'], ['Screen jobs', 'screen-jobs.js'], ['Find contacts', 'find-contacts.js'], ['Draft emails', 'draft-emails.js'], ['Make plan', 'make-plan.js']];
+export const STAGES = [['Fetch jobs', 'fetch-jobs.js', '抓取职位'], ['Screen jobs', 'screen-jobs.js', 'AI 评分'], ['Find contacts', 'find-contacts.js', '找投递邮箱'], ['Draft emails', 'draft-emails.js', 'AI 写信'], ['Make plan', 'make-plan.js', '生成计划']];
 
 export function loadSource(name, srcDir = path.join(here, '..', 'workflows', 'src')) {
   return fs.readFileSync(path.join(srcDir, name), 'utf8').replace(/^\/\/@include (\S+)$/gm, (_, inc) => fs.readFileSync(path.join(srcDir, 'lib', inc), 'utf8'));
@@ -51,8 +51,8 @@ export async function runDirect({ env, fetchImpl, srcDir, log = () => {} }) {
   const http = makeHttp(fetchImpl);
   const req = createRequire(import.meta.url);
   let data = {};
-  for (const [name, file] of STAGES) {
-    const t = Date.now();
+  for (const [name, file, zh] of STAGES) {
+    const t = Date.now(); log(`${zh}…`);
     const fn = new AsyncFunction('require', '$env', '$input', loadSource(file, srcDir));
     const out = await fn.call({ helpers: { httpRequest: http } }, req, env, { first: () => ({ json: data }), all: () => [{ json: data }] });
     data = out[0].json; log(`${name}: ${Date.now() - t} ms`);
@@ -70,6 +70,7 @@ export async function runN8n({ env, home, planFile, expectedBuild, timeoutMs = 3
     N8N_RUNNERS_TASK_TIMEOUT: String(Math.ceil(timeoutMs / 1000)), EXECUTIONS_DATA_SAVE_ON_SUCCESS: 'none', JOBHUNT_PLAN_FILE: planFile, JOBHUNT_HOME: home,
   };
   fs.mkdirSync(e.N8N_USER_FOLDER, { recursive: true });
+  log('正在运行工作流：抓取职位 → AI 评分 → 找投递邮箱 → AI 写信（通常 1–5 分钟，期间没有进度输出）…');
   const t0 = Date.now();
   const { stdout, code, killed } = await new Promise((resolve) => {
     const p = spawn('n8n', ['execute', `--id=${WORKFLOW_ID}`, '--rawOutput'], { env: e, stdio: ['ignore', 'pipe', 'pipe'] });
