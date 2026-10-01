@@ -4,8 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { runHunt, preflight, resolveSettings } from '../scripts/hunt.mjs';
+import { runHunt, preflight, resolveSettings, Store } from '../scripts/hunt.mjs';
 import { acquireLock } from '../scripts/lib/lock.mjs';
+import http from 'node:http';
+import { makeHttp, MAX_BODY } from '../scripts/engine.mjs';
 import { tmpdir, writeProfile, startFakeWorld, startFakeSmtp, baseEnv, findNodemailer } from './helpers.mjs';
 
 const nm = findNodemailer();
@@ -449,5 +451,89 @@ test('a daily cap of 0 is a pause: postings are listed once with the address, no
     assert.equal(r.acted.listed.length, 1); assert.match(r.acted.listed[0].note, /每日上限设为 0/); assert.equal(r.acted.listed[0].to, 'hr@acme-corp.com');
     const again = await run(t.home, t.world, t.smtp, { MAX_APPLICATIONS_PER_DAY: '0' }, ['--direct', '--force']);
     assert.equal(again.plan.items.length, 0, 'handled: not fetched and scored again');
+  } finally { await t.done(); }
+});
+
+test('a hostile feed cannot stall the run: the body is bounded and items are cut out in linear time', { skip }, async () => {
+  const big = (base) => `<rss><channel>${'<item><title>x</title>'.repeat(20000)}</channel></rss>`;                 // 20k unclosed items, ~400 KB
+  const t = await setup({ feeds: { '/feed/evil.xml': big } }, []);
+  try {
+    const t0 = Date.now();
+    const r = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '', JOB_RSS_URLS: `${t.world.base}/feed/evil.xml` });
+    assert.equal(r.code, 0, r.message); assert.equal(r.plan.fetched, 0);
+    assert.ok(Date.now() - t0 < 8000, `took ${Date.now() - t0} ms`);
+  } finally { await t.done(); }
+  // the direct engine stops reading a response past MAX_BODY
+  const srv = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/plain' }); const chunk = Buffer.alloc(1024 * 1024, 65); let n = 0; const push = () => { while (n < 12 && res.write(chunk)) n += 1; if (n >= 12) res.end(); else res.once('drain', push); }; push(); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try { await assert.rejects(makeHttp()({ url: `http://127.0.0.1:${srv.address().port}/` }), /larger than/); assert.ok(MAX_BODY <= 12 * 1024 * 1024); } finally { srv.close(); }
+});
+
+test('a posting link to this computer or the local network is never fetched for its page', { skip }, async () => {
+  const jobs = [{ title: 'N 分析', company: 'Net', snippet: '[score:9] 请在官网投递。', page: '<html><a href="/apply">Apply</a></html>' }];
+  const t = await setup({}, jobs);
+  try {
+    const r = await run(t.home, t.world, t.smtp, { JOBHUNT_ALLOW_LOCAL_FETCH: '' });                           // the fake page lives on 127.0.0.1: refused
+    assert.equal(r.acted.listed.length, 1); assert.equal(r.acted.listed[0].applyUrl, '');
+    assert.deepEqual(t.world.log.pages, [], 'no request went to the local address');
+    const t2 = await setup({}, jobs);
+    try { const ok = await run(t2.home, t2.world, t2.smtp); assert.match(ok.acted.listed[0].applyUrl, /\/apply$/); assert.equal(t2.world.log.pages.length, 1); } finally { await t2.done(); }
+  } finally { await t.done(); }
+});
+
+test('secrets echoed by an upstream error never reach the report or Discord', { skip }, async () => {
+  const t = await setup({}, [JOBS[1]]);
+  try {
+    const key = 'jooble-secret-123456';
+    const r = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: key, JOOBLE_API_BASE: `${t.world.base}/jooble-echo`, JOB_RSS_URLS: `${t.world.base}/feed/none.xml`, REMOTIVE: 'on', REMOTIVE_API_BASE: `${t.world.base}/remotive`, DISCORD_WEBHOOK_URL: `${t.world.base}/discord/x` });
+    assert.equal(r.code, 0, r.message);
+    assert.ok(r.plan.warnings.some((w) => /Jooble/.test(w)), 'the failing source is reported');
+    assert.ok(!r.report.includes(key), 'report'); assert.ok(!fs.readFileSync(path.join(t.home, 'data', 'reports', `${new Date().toLocaleDateString('sv-SE')}.md`), 'utf8').includes(key), 'report file');
+    assert.equal(t.world.log.discord.length, 1); assert.ok(!t.world.log.discord[0].includes(key), 'discord');
+    assert.deepEqual(JSON.parse(t.world.log.discord[0]).allowed_mentions, { parse: [] });
+  } finally { await t.done(); }
+});
+
+test('console bookkeeping (a mark, an undo) is never a send: it does not count against the cap, forget a recipient or use up a retry', { skip }, async () => {
+  // readers in hunt.mjs
+  const home = tmpdir(); fs.mkdirSync(path.join(home, 'data'), { recursive: true });
+  const old = new Date(Date.now() - 10 * 86400000).toISOString(); const id = 'd'.repeat(16);
+  fs.writeFileSync(path.join(home, 'data', 'applications.jsonl'), [{ ts: old, id, status: 'sending', to: 'hr@acme-corp.com' }, { ts: old, id, status: 'unknown', to: 'hr@acme-corp.com' }, { ts: new Date().toISOString(), id, status: 'dismissed' }, { ts: new Date().toISOString(), id, status: 'unknown' }].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const store = new Store(home, { dryRun: true });
+  assert.equal(store.sentToday(), 0, 'the undo event dated today is not a send');
+  assert.equal(store.lastContact('hr@acme-corp.com'), Date.parse(old), 'the recipient of the real send is still remembered');
+  // the retry budget of the workflow: three real failures, not three console events
+  const t = await setup({}, [JOBS[0]]);
+  const refusing = await startFakeSmtp({ mode: 'refuse-rcpt' });
+  try {
+    await run(t.home, t.world, t.smtp, { SMTP_PORT: String(refusing.port) });
+    const pid = events(t.home).find((e) => e.title.startsWith('A')).id;
+    for (let i = 0; i < 2; i++) fs.appendFileSync(path.join(t.home, 'data', 'applications.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: pid, status: 'dismissed' })}\n${JSON.stringify({ ts: new Date().toISOString(), id: pid, status: 'failed' })}\n`);   // dismiss + undo, twice
+    const r = await run(t.home, t.world, t.smtp, {}, ['--direct', '--force']);
+    assert.equal(r.acted.sent.length, 1, 'still retried: only one real attempt failed');
+  } finally { await refusing.close(); await t.done(); }
+});
+
+test('to-apply.csv mirrors the state after every run: what the user marked in the console shows up in Excel, newest first', { skip }, async () => {
+  const t = await setup();
+  try {
+    await run(t.home, t.world, t.smtp);
+    const csv = () => fs.readFileSync(path.join(t.home, 'data', 'to-apply.csv'), 'utf8').split('\n').filter(Boolean);
+    assert.equal(csv().length, 3); assert.ok(csv().slice(1).every((l) => l.endsWith('"待投递"')));
+    const b = events(t.home).find((e) => e.title.startsWith('B')).id;
+    fs.appendFileSync(path.join(t.home, 'data', 'applications.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: b, status: 'applied' })}\n`);   // as the console does
+    await run(t.home, t.world, t.smtp, {}, ['--direct', '--force']);
+    const lines = csv(); assert.equal(lines.length, 3, 'rewritten, not appended');
+    assert.ok(lines.some((l) => /"B 数据分析助理".*"我已投递"$/.test(l)), lines.join('\n')); assert.ok(lines.some((l) => /"D 假邮箱岗位".*"待投递"$/.test(l)));
+  } finally { await t.done(); }
+});
+
+test('the same vacancy from another board (another link, same title and company) is not new', { skip }, async () => {
+  const t = await setup({}, [{ title: 'X 数据分析实习生', company: 'Acme', snippet: '[score:9] 简历请发 hr@acme-corp.com' }]);
+  try {
+    const first = await run(t.home, t.world, t.smtp); assert.equal(first.acted.sent.length, 1);
+    // tomorrow Remotive lists the same vacancy under its own link
+    const again = await run(t.home, t.world, t.smtp, { JOOBLE_API_KEY: '', JOB_KEYWORDS: '', REMOTIVE: 'on', REMOTIVE_API_BASE: `${t.world.base}/remotive` }, ['--direct', '--force']);
+    assert.equal(again.plan.fetched, 1); assert.equal(again.plan.items.length, 0);
   } finally { await t.done(); }
 });

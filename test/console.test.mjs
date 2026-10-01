@@ -396,3 +396,37 @@ test('the Discord test posts one message to the webhook and reports the outcome;
     assert.deepEqual((await c.call('GET', '/api/state')).json.schedule.retries, ['08:20', '08:40', '09:30']);
   } finally { await world.close(); await c.close(); }
 });
+
+test('the local test mailbox only talks to SMTP clients: a browser request is closed and nothing is stored', async () => {
+  const { default: net } = await import('node:net');
+  const dir = tmpdir('jh-sink-'); const sink = startSink({ dir, port: 0 }); await new Promise((r) => sink.once('listening', r));
+  try {
+    const reply = await new Promise((resolve) => { let out = ''; const s = net.connect(sink.address().port, '127.0.0.1', () => s.write('POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 30\r\n\r\nDATA\r\nSubject: x\r\n\r\nhello\r\n.\r\n')); s.on('data', (d) => { out += d; }); s.on('close', () => resolve(out)); s.on('error', () => resolve(out)); });
+    assert.match(reply, /554/); assert.equal(sinkCount(dir), 0);
+  } finally { sink.close(); }
+});
+
+test('a huge "logo" is refused by its size, before or while it is read', async () => {
+  const calls = [];
+  const web = { 'https://cdn.example.org/claims-big.png': () => resp(PNG, 'image/png', 200, { 'content-length': String(5 * 1024 * 1024) }), 'https://cdn.example.org/is-big.png': () => resp(Buffer.alloc(400 * 1024, 1), 'image/png') };
+  const c = await boot({ lookup: async () => [{ address: '93.184.216.34' }], fetchImpl: async (u) => { calls.push(u); return (web[u] || (() => resp(Buffer.alloc(0), 'text/plain', 404)))(); } });
+  try {
+    c.ctx.appendEvent({ id: 'a'.repeat(16), status: 'manual', title: 'A', logo: 'https://cdn.example.org/claims-big.png' });
+    c.ctx.appendEvent({ id: 'b'.repeat(16), status: 'manual', title: 'B', logo: 'https://cdn.example.org/is-big.png' });
+    assert.equal((await c.call('GET', `/api/logo?id=${'a'.repeat(16)}`)).status, 404);
+    assert.equal((await c.call('GET', `/api/logo?id=${'b'.repeat(16)}`)).status, 404);
+  } finally { await c.close(); }
+});
+
+test('清除测试记录 keeps the postings the user already decided about', async () => {
+  const c = await boot();
+  try {
+    const a = '1'.repeat(16); const b = '2'.repeat(16);
+    c.ctx.appendEvent({ id: a, status: 'sent', title: 'A', to: 'me@example.net', intendedTo: 'hr@a.com', redirected: true });
+    c.ctx.appendEvent({ id: b, status: 'unknown', title: 'B', to: 'me@example.net', intendedTo: 'hr@b.com', redirected: true });
+    c.ctx.appendEvent({ id: b, status: 'dismissed' });
+    const r = (await c.call('POST', '/api/jobs/clear-test')).json; assert.deepEqual([r.ok, r.removed], [true, 1]);
+    const jobs = (await c.call('GET', '/api/jobs')).json.jobs;
+    assert.ok(!jobs.some((j) => j.id === a)); assert.equal(jobs.find((j) => j.id === b).status, 'dismissed');
+  } finally { await c.close(); }
+});

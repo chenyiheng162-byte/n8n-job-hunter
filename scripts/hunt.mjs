@@ -64,6 +64,7 @@ export function preflight({ s, profileFile, cfg }, { forSending = true } = {}) {
 const profileField = (profile, labels) => { for (const l of labels) { const m = profile.match(new RegExp(`^[\\s>*-]*${l}\\s*[:：]\\s*(.+)$`, 'mi')); if (m && m[1].trim() && !/待填写/.test(m[1])) return m[1].trim(); } return ''; };
 
 // ------------------------------------------------------------------ state
+const SEND_STATUS = ['sending', 'sent', 'unknown', 'failed'];
 export class Store {
   constructor(home, { dryRun = false } = {}) {
     this.dir = path.join(home, 'data'); this.file = path.join(this.dir, 'applications.jsonl'); this.dryRun = dryRun;
@@ -77,16 +78,17 @@ export class Store {
   record(ev) { if (this.dryRun) return; fs.appendFileSync(this.file, `${JSON.stringify({ ts: new Date().toISOString(), ...ev })}\n`); }
   // How many postings were (possibly) mailed today. Counted per posting, not per event: one send writes "sending" AND
   // "sent" (or "unknown"), and a send that certainly failed frees its slot again.
+  // (Only the sender's own events carry `to`: a console mark, or an undo restoring an earlier status, is not a send.)
   sentToday(day = today()) {
     const byId = new Map();
-    for (const e of this.events()) { if (!e.id) continue; const c = byId.get(e.id) || { today: false, last: '' }; if (['sent', 'sending', 'unknown'].includes(e.status) && e.ts && today(new Date(e.ts)) === day) c.today = true; c.last = e.status; byId.set(e.id, c); }
+    for (const e of this.events()) { if (!e.id || e.to === undefined || !SEND_STATUS.includes(e.status)) continue; const c = byId.get(e.id) || { today: false, last: '' }; if (e.status !== 'failed' && e.ts && today(new Date(e.ts)) === day) c.today = true; c.last = e.status; byId.set(e.id, c); }
     return [...byId.values()].filter((c) => c.today && c.last !== 'failed').length;
   }
   // When was `to` last really written to? Decided per posting by its LAST send status (a failed send reached nobody and must
   // not start a cooldown; a test-mode send is not real contact). 0 = never.
   lastContact(to) {
     const t = String(to).toLowerCase(); const last = new Map();
-    for (const e of this.events()) if (e.id && ['sent', 'sending', 'unknown', 'failed'].includes(e.status)) last.set(e.id, e);
+    for (const e of this.events()) if (e.id && e.to !== undefined && SEND_STATUS.includes(e.status)) last.set(e.id, e);
     return Math.max(0, ...[...last.values()].filter((e) => e.status !== 'failed' && e.to && !e.redirected && String(e.to).toLowerCase() === t).map((e) => Date.parse(e.ts) || 0));
   }
   marker(name) { return path.join(this.stateDir, name); }
@@ -179,6 +181,20 @@ export async function act({ plan, store, ctx, send, log = () => {} }) {
   return out;
 }
 
+// ------------------------------------------------------------------ the to-apply spreadsheet
+// to-apply.csv is rewritten from the current state after every run: every posting that was ever listed for the user, with
+// what the user did about it in the console (待投递 / 我已投递 / 已忽略), newest first. Excel opens it directly.
+const CSV_STATUS = { manual: '待投递', applied: '我已投递', dismissed: '已忽略' };
+export function writeTodoCsv(store) {
+  const merged = new Map();
+  for (const e of store.events()) { if (!e.id) continue; const m = merged.get(e.id) || {}; merged.set(e.id, { ...m, ...e, listedAt: m.listedAt || (e.status === 'manual' ? e.ts : undefined) }); }
+  const rows = [...merged.values()].filter((j) => CSV_STATUS[j.status] && j.listedAt).sort((a, b) => String(b.listedAt).localeCompare(String(a.listedAt)));
+  const file = path.join(store.dir, 'to-apply.csv');
+  if (!rows.length && !fs.existsSync(file)) return;
+  const text = `﻿日期,公司,岗位,评分,投递链接,理由,备注,状态\n${rows.map((j) => [today(new Date(j.listedAt)), j.company, j.title, j.score, j.applyUrl || j.url, j.reason, j.note || '', CSV_STATUS[j.status]].map(csvCell).join(',')).join('\n')}${rows.length ? '\n' : ''}`;
+  const tmp = `${file}.tmp-${process.pid}`; fs.writeFileSync(tmp, text); fs.renameSync(tmp, file);
+}
+
 // ------------------------------------------------------------------ report
 export function renderReport({ plan, result, date, dryRun, warnings }) {
   const L = [];
@@ -219,7 +235,7 @@ export async function waitForNetwork(url, { fetchImpl = globalThis.fetch, maxMs,
 const notify = (title, text) => { try { spawnSync('osascript', ['-e', `display notification ${JSON.stringify(text)} with title ${JSON.stringify(title)}`], { timeout: 5000 }); } catch (e) { /* optional */ } };
 
 async function postDiscord(url, text, fetchImpl) {
-  try { await makeHttp(fetchImpl)({ method: 'POST', url, body: { content: text.slice(0, 1900) }, timeout: 15000 }); } catch (e) { /* the report file is the record; Discord is a courtesy */ }
+  try { await makeHttp(fetchImpl)({ method: 'POST', url, body: { content: text.slice(0, 1900), allowed_mentions: { parse: [] } }, timeout: 15000 }); } catch (e) { /* the report file is the record; Discord is a courtesy */ } // no mentions: a posting title could say @everyone
 }
 
 // ------------------------------------------------------------------ main
@@ -274,9 +290,11 @@ export async function runHunt({ env = process.env, args = [], fetchImpl = global
     // (a source that answered with zero postings did not fail)
     if (!plan.fetched && !plan.sourcesOk && (plan.warnings || []).some((w) => /^(Jooble|Remotive|RSS)/.test(w))) throw new Error(`所有职位来源都失败了：${plan.warnings[0]}`);
 
+    // warnings carry upstream error bodies: the exact secrets are scrubbed before anything is written or posted
+    plan.warnings = (plan.warnings || []).map((w) => redact(w, secrets));
     // sending
     let sender = send;
-    const warnings = [...pf.warnings];
+    const warnings = pf.warnings.map((w) => redact(w, secrets));
     const wantSend = st.s.AUTO_SEND !== 'off' && st.s.SMTP_HOST && (st.s.SMTP_FROM || st.s.SMTP_USER) && st.s.RESUME_FILE && fs.existsSync(st.s.RESUME_FILE);
     if (!sender && wantSend && !dryRun) {
       const req = loadNodemailer(env, st.home);
@@ -285,17 +303,12 @@ export async function runHunt({ env = process.env, args = [], fetchImpl = global
     const profile = pf.profile;
     const ctx = { s: st.s, num: st.num, dryRun, fromName: st.s.MAIL_FROM_NAME || profileField(profile, ['姓名', 'Name']), replyTo: st.s.REPLY_TO || profileField(profile, ['邮箱', 'Email', 'E-mail']) };
     const acted = await act({ plan, store, ctx, send: sender, log });
-    if (!direct) pruneExecutions(st.home);
 
     const report = renderReport({ plan, result: acted, date, dryRun, warnings });
     result.report = report; result.acted = acted; result.plan = plan;
     if (!dryRun) {
       fs.writeFileSync(path.join(store.reports, `${date}.md`), `${report}\n`);
-      if (acted.listed.length) {
-        const csv = path.join(store.dir, 'to-apply.csv');
-        if (!fs.existsSync(csv)) fs.writeFileSync(csv, '﻿日期,公司,岗位,评分,投递链接,理由,备注,状态\n');
-        fs.appendFileSync(csv, acted.listed.map((i) => [date, i.company, i.title, i.score, i.url, i.reason, i.note || '', '待投递'].map(csvCell).join(',')).join('\n') + '\n');
-      }
+      writeTodoCsv(store);
       store.set(`done-${date}`);
       lastRun({ result: 'ok', engine: direct ? 'direct' : 'n8n', sent: acted.sent.length, listed: acted.listed.length, skipped: acted.skipped.length, attention: acted.attention.length, fetched: plan.fetched, warnings: (plan.warnings || []).length + warnings.length });
       const head = `已投递 ${acted.sent.length} · 待你投递 ${acted.listed.length}${acted.attention.length ? ` · 需留意 ${acted.attention.length}` : ''}`;
@@ -310,6 +323,7 @@ export async function runHunt({ env = process.env, args = [], fetchImpl = global
     if (!dryRun && !store.has(`notified-${date}`)) { store.set(`notified-${date}`); notifier('求职助手', msg.slice(0, 120)); }
     return { code: 1, message: msg, report: msg };
   } finally {
+    if (!direct && !dryRun) pruneExecutions(st.home);
     await lock.release();
   }
 }

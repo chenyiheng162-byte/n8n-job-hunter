@@ -40,8 +40,12 @@ const jobIdOf = (url, title = '', company = '') => { const u = canonicalUrl(url)
 // ---- state: applications.jsonl is append-only; the LAST event of an id is its status ----
 // statuses: skipped | manual | sending | sent | unknown | failed.  A job is "handled" (never looked at again) once it has
 // any status, except `failed`, which is retried on later days up to 3 times.
+// Events written by the sender (hunt.mjs) carry `to`; the console's bookkeeping events (applied / dismissed / an undo that
+// restores an earlier status) never do, and must not look like a send attempt or forget a recipient.
+const SEND_STATUS = ['sending', 'sent', 'unknown', 'failed'];
+const isSendEvent = (ev) => SEND_STATUS.includes(ev.status) && ev.to !== undefined;
 function loadState() {
-  const jobs = new Map(); const recipients = new Map();
+  const jobs = new Map(); const recipients = new Map(); const keys = new Map();
   let text = '';
   try { text = fs.readFileSync(STATE_FILE, 'utf8'); } catch (e) { /* no history yet */ }
   for (const line of text.split('\n')) {
@@ -49,9 +53,10 @@ function loadState() {
     let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
     if (!ev || !ev.id) continue;
     const cur = jobs.get(ev.id) || { attempts: 0 };
-    if (ev.status === 'failed') cur.attempts += 1;
+    if (ev.status === 'failed' && isSendEvent(ev)) cur.attempts += 1;
     cur.status = ev.status; cur.ts = ev.ts; if (ev.score !== undefined) cur.score = ev.score;
-    if (['sending', 'sent', 'unknown', 'failed'].includes(ev.status)) { cur.send = ev.status; cur.sendTs = ev.ts; cur.to = String(ev.to || '').toLowerCase(); cur.redirected = !!ev.redirected; }
+    if (isSendEvent(ev)) { cur.send = ev.status; cur.sendTs = ev.ts; cur.to = String(ev.to || '').toLowerCase(); cur.redirected = !!ev.redirected; }
+    if (ev.title && ev.company) { const k = `${String(ev.title).toLowerCase()}|${String(ev.company).toLowerCase()}`; if (!keys.has(k)) keys.set(k, new Set()); keys.get(k).add(ev.id); }
     jobs.set(ev.id, cur);
   }
   // Addresses really written to, decided by the LAST send status of each posting: a send that certainly failed reached nobody
@@ -61,7 +66,10 @@ function loadState() {
     const prev = recipients.get(s.to); if (!prev || String(s.sendTs) > String(prev)) recipients.set(s.to, s.sendTs);
   }
   // A posting that was skipped for a score the user has since made acceptable (lowered MIN_SCORE) is looked at again.
-  return { jobs, recipients, handled: (id) => { const s = jobs.get(id); return !!s && !(s.status === 'failed' && s.attempts < 3) && !(s.status === 'skipped' && Number.isFinite(s.score) && s.score >= MIN_SCORE); } };
+  const handled = (id) => { const s = jobs.get(id); return !!s && !(s.status === 'failed' && s.attempts < 3) && !(s.status === 'skipped' && Number.isFinite(s.score) && s.score >= MIN_SCORE); };
+  // the same vacancy reached through another board (another link, same title and company) is not new either
+  const handledKey = (k) => [...(keys.get(k) || [])].some(handled);
+  return { jobs, recipients, handled, handledKey };
 }
 
 function readProfile() {
@@ -75,6 +83,20 @@ const decodeEntities = (s) => String(s || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]
   .replace(/&#x([0-9a-f]+);/gi, (_, h) => { const n = parseInt(h, 16); return n > 0 && n <= 0x10FFFF ? String.fromCodePoint(n) : ''; });
 const htmlToText = (h) => decodeEntities(String(h || '').replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<br\s*\/?>|<\/(p|div|li|h\d|tr)>/gi, '\n').replace(/<[^>]+>/g, ' '))
   .replace(/[ \t\f\v ]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
+
+// A link that came from a feed or a board may point anywhere. Before fetching such a page: http(s) only, and never this
+// computer or the local network (a feed must not be able to make the morning run call a router or a local service).
+// Tests, which serve their fake pages on 127.0.0.1, set JOBHUNT_ALLOW_LOCAL_FETCH=on.
+const privateV4 = (h) => { const [a, b] = h.split('.').map(Number); return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127); };
+function fetchable(u) {
+  const m = String(u || '').match(/^https?:\/\/(\[[^\]]+\]|[^\/?#:]+)(?::\d+)?(?:[\/?#]|$)/i); if (!m) return false;
+  if (E('JOBHUNT_ALLOW_LOCAL_FETCH') === 'on') return true;
+  const h = m[1].replace(/^\[|\]$/g, '').toLowerCase();
+  if (h === 'localhost' || /\.(local|internal|localdomain|home|lan|localhost)$/.test(h) || !h.includes('.') && !h.includes(':')) return false;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return !privateV4(h);
+  if (h.includes(':')) return !(h === '::1' || h === '::' || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith('::ffff:'));
+  return true;
+}
 
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
 const BAD_LOCAL = /^(no-?reply|do-?not-?reply|mailer-daemon|postmaster|abuse|privacy|press|webmaster|admin|root|info@?)$/i;

@@ -59,7 +59,7 @@ if (cmd === 'console') {
   const byId = new Map(); for (const e of store.events()) byId.set(e.id, { ...(byId.get(e.id) || {}), ...e });   // one row per posting: its latest status
   const ev = [...byId.values()];
   const count = (s) => ev.filter((e) => e.status === s).length;
-  console.log(`累计：已投递 ${count('sent')} · 待你投递 ${count('manual')} · 结果不确定 ${count('unknown')} · 跳过 ${count('skipped')}`);
+  console.log(`累计：已邮件投递 ${count('sent')} · 你已自己投递 ${count('applied')} · 待你投递 ${count('manual')} · 结果不确定 ${count('unknown') + count('sending')} · 发送失败待重试 ${count('failed')} · 已忽略 ${count('dismissed')} · 跳过 ${count('skipped')}`);
   const reports = fs.existsSync(store.reports) ? fs.readdirSync(store.reports).filter((f) => f.endsWith('.md')).sort() : [];
   console.log(`最近一次日报：${reports.length ? reports[reports.length - 1].replace('.md', '') : '还没有'}`);
   const lc = spawnSync('launchctl', ['list'], { encoding: 'utf8' }).stdout || '';

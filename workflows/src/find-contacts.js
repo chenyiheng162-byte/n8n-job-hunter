@@ -10,9 +10,13 @@ const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (
 const cooldownMs = Number(E('RECIPIENT_COOLDOWN_DAYS', '30')) * 86400000;
 const ok = (e) => { const ts = state.recipients.get(e); return !ts || Date.now() - Date.parse(ts) >= cooldownMs; }; // written to within the cooldown: not used (hunt.mjs checks again when sending)
 
+let tlsWarned = false;
 async function verify(email) { // MailboxLayer: mailbox must exist and not be disposable
   if (!E('MAILBOXLAYER_API_KEY')) return false;
-  const r = await http({ method: 'GET', url: `${E('MAILBOXLAYER_API_BASE', 'http://apilayer.net/api/check')}?access_key=${encodeURIComponent(E('MAILBOXLAYER_API_KEY'))}&email=${encodeURIComponent(email)}`, json: true, timeout: 20000 });
+  // https by default: the key and the addresses travel in the URL. The free plan may refuse https (error 105): then nothing is
+  // verified (and nothing used) rather than silently sending the key in clear.
+  const r = await http({ method: 'GET', url: `${E('MAILBOXLAYER_API_BASE', 'https://apilayer.net/api/check')}?access_key=${encodeURIComponent(E('MAILBOXLAYER_API_KEY'))}&email=${encodeURIComponent(email)}`, json: true, timeout: 20000 });
+  if (r && r.error && Number(r.error.code) === 105) { if (!tlsWarned) { tlsWarned = true; input.warnings.push('MailboxLayer 免费套餐不支持 HTTPS：搜到的邮箱没有验证，所以没有采用（付费套餐或自己设置 MAILBOXLAYER_API_BASE）'); } return false; }
   return !!(r && r.mx_found && r.smtp_check && !r.disposable);
 }
 
@@ -47,7 +51,7 @@ for (const j of input.jobs) {
   if (overBudget()) { input.warnings.push('找邮箱阶段超时，剩余岗位按网站投递处理'); j.route = 'site'; continue; }
   let found = emailsIn(j.description).filter(ok);
   let source = 'posting';
-  if (!found.length) {
+  if (!found.length && fetchable(j.url)) {
     try {
       const page = await http({ method: 'GET', url: j.url, headers: { 'User-Agent': UA }, timeout: 15000 });
       const html = typeof page === 'string' ? page.slice(0, 300000) : JSON.stringify(page).slice(0, 300000);

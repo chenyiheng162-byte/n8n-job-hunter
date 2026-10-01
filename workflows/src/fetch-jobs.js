@@ -35,8 +35,10 @@ if (E('REMOTIVE', 'off') === 'on') {
 // Any RSS/Atom feed (for example a LinkedIn search turned into a feed by rss.app)
 for (const feed of E('JOB_RSS_URLS').split(/[\s,]+/).filter(Boolean)) {
   try {
-    const xml = String(await http({ method: 'GET', url: feed, timeout: 30000 }));
-    const items = xml.match(/<(item|entry)[\s>][\s\S]*?<\/\1>/g) || [];
+    const xml = String(await http({ method: 'GET', url: feed, timeout: 30000 })).slice(0, 5000000);
+    // items are cut out with indexOf (linear), never with a lazy regex over the whole feed (quadratic on a hostile feed)
+    const items = []; const open = /<(item|entry)[\s>]/g; let m;
+    while (items.length < 1000 && (m = open.exec(xml))) { const close = xml.indexOf(`</${m[1]}>`, m.index); if (close < 0) break; items.push(xml.slice(m.index, close)); open.lastIndex = close; }
     const tag = (s, n) => { const m = s.match(new RegExp(`<${n}[^>]*>([\\s\\S]*?)</${n}>`, 'i')); return m ? decodeEntities(m[1]).trim() : ''; };
     for (const it of items) {
       const link = (tag(it, 'link') || decodeEntities((it.match(/<link[^>]*href="([^"]+)"/i) || [])[1] || '')).trim(); // Atom: <link href="...&amp;..."/>
@@ -57,7 +59,7 @@ for (const j of raw.sort((a, b) => b.postedAt - a.postedAt)) {
   if (j.postedAt && Date.now() - j.postedAt > maxAgeMs) continue;
   const id = jobIdOf(j.url, j.title, j.company);
   const dupKey = `${String(j.title).toLowerCase()}|${String(j.company).toLowerCase()}`;
-  if (seen.has(id) || (j.company && seen.has(dupKey)) || state.handled(id)) continue;
+  if (seen.has(id) || (j.company && (seen.has(dupKey) || state.handledKey(dupKey))) || state.handled(id)) continue;
   seen.add(id); if (j.company) seen.add(dupKey);
   jobs.push({ id, title: String(j.title).slice(0, 200), company: String(j.company || '').slice(0, 120), location: String(j.location || '').slice(0, 120), description: String(j.description || '').slice(0, 5000), url: j.url, source: j.source, postedAt: j.postedAt || 0, salary: String(j.salary || '').slice(0, 80), jobType: String(j.jobType || '').slice(0, 40), tags: tagList(j.tags), category: String(j.category || '').slice(0, 60), logo: httpUrl(j.logo) });
 }

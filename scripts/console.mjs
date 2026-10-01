@@ -77,12 +77,20 @@ async function fetchLogo(ctx, url) {
     if (r.status >= 300 && r.status < 400 && r.headers.get('location')) { u = new URL(r.headers.get('location'), p.href).href; continue; }   // every hop is checked again
     const type = (r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
     if (!r.ok || !/^image\/(png|jpeg|gif|webp)$/.test(type)) return null;                       // no SVG: it can carry script
-    const buf = Buffer.from(await r.arrayBuffer());
-    return buf.length > 0 && buf.length <= 300 * 1024 ? { buf, type } : null;
+    if (Number(r.headers.get('content-length')) > 300 * 1024) return null;
+    const buf = await readUpTo(r, 300 * 1024);                                                    // never buffer a huge "logo"
+    return buf && buf.length > 0 ? { buf, type } : null;
   }
   return null;
 }
 
+// the body of a response, or null once it exceeds `max` bytes (the rest is not read)
+async function readUpTo(r, max) {
+  if (!r.body || typeof r.body.getReader !== 'function') { const b = Buffer.from(await r.arrayBuffer()); return b.length <= max ? b : null; }
+  const reader = r.body.getReader(); const chunks = []; let n = 0;
+  for (;;) { const { done, value } = await reader.read(); if (done) break; n += value.length; if (n > max) { reader.cancel().catch(() => {}); return null; } chunks.push(value); }
+  return Buffer.concat(chunks);
+}
 const hostOf = (u) => { try { return new URL(u).host; } catch (e) { return ''; } };
 
 // Returns [normalisedValue, null] or [null, message]. '' means "remove the setting".
@@ -113,6 +121,9 @@ export function makeContext(opts = {}) {
   const scriptsDir = opts.scriptsDir || here;
   const profileFile = path.join(home, 'profile.md');
   const store = () => new Store(home, { dryRun: true }); // read-only view; writes append through appendEvent
+  // applications.jsonl is parsed once per version of the file (size + mtime), not once per request / per logo
+  let cache = { key: '', events: [] };
+  const events = () => { let st; try { st = fs.statSync(path.join(home, 'data', 'applications.jsonl')); } catch (e) { return []; } const key = `${st.size}:${st.mtimeMs}`; if (cache.key !== key) cache = { key, events: store().events() }; return cache.events; };
   const cfg = () => loadConfig(home).values;
   const secrets = () => SECRET_KEYS.flatMap((k) => String(cfg()[k] || '').split(/\s+/)).filter((v) => v.length >= 6);
   const readProfile = () => { try { return parseProfile(fs.readFileSync(profileFile, 'utf8')); } catch (e) { return emptyProfile(); } };
@@ -123,7 +134,7 @@ export function makeContext(opts = {}) {
   const appendEvent = (ev) => { const d = path.join(home, 'data'); fs.mkdirSync(d, { recursive: true }); fs.appendFileSync(path.join(d, 'applications.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), ...ev })}\n`); };
   const sinkPort = opts.sinkPort || 5725;
   const lookup = opts.lookup || ((h) => dns.lookup(h, { all: true }));
-  return { home, label, scriptsDir, sinkPort, lookup, fetchImpl: opts.fetchImpl || globalThis.fetch, profileFile, store, cfg, secrets, readProfile, resumeInfo, appendEvent, run: { proc: null, mode: '', startedAt: 0, lines: [], code: null }, env: opts.env || process.env, nodeBin: opts.nodeBin || process.execPath };
+  return { home, label, scriptsDir, sinkPort, lookup, fetchImpl: opts.fetchImpl || globalThis.fetch, profileFile, store, events, cfg, secrets, readProfile, resumeInfo, appendEvent, run: { proc: null, mode: '', startedAt: 0, lines: [], code: null }, env: opts.env || process.env, nodeBin: opts.nodeBin || process.execPath };
 }
 
 const effective = (ctx) => ctx.cfg();
@@ -155,7 +166,7 @@ const httpOnly = (u) => (/^https?:\/\//.test(u || '') ? u : '');
 const STATUS_GROUP = { manual: 'todo', sent: 'sent', sending: 'attention', unknown: 'attention', failed: 'attention', applied: 'done', dismissed: 'done', skipped: 'skipped' };
 function jobsView(ctx) {
   const merged = new Map();
-  for (const e of ctx.store().events()) {
+  for (const e of ctx.events()) {
     const prev = merged.get(e.id) || {};
     merged.set(e.id, { ...prev, ...Object.fromEntries(Object.entries(e).filter(([, v]) => v !== undefined)) });
   }
@@ -211,7 +222,7 @@ async function testSmtp(ctx) {
 async function testDiscord(ctx) {
   const s = effective(ctx); if (!s.DISCORD_WEBHOOK_URL) return { ok: false, message: '先填 Webhook 地址并保存' };
   try {
-    const r = await fetch(s.DISCORD_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: '求职助手：这是一条测试消息，说明 Discord 通知设置正常。' }), signal: AbortSignal.timeout(15000) });
+    const r = await fetch(s.DISCORD_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: '求职助手：这是一条测试消息，说明 Discord 通知设置正常。', allowed_mentions: { parse: [] } }), signal: AbortSignal.timeout(15000) });
     return r.ok ? { ok: true, message: '已发送一条测试消息到 Discord，请去频道里看看' } : { ok: false, message: `Discord 返回 ${r.status}（Webhook 地址对吗？）` };
   } catch (e) { return { ok: false, message: `连不上：${redactAll(e.message, ctx.secrets())}` }; }
 }
@@ -325,7 +336,7 @@ export function createApi(ctx) {
       if (!job) return { status: 404, body: { ok: false, message: '找不到这个岗位' } };
       if (['skipped', 'sent'].includes(job.status)) return { status: 400, body: { ok: false, message: '这个状态不能改' } };
       // "put back" means back to what it was before the user marked it (unknown/failed stay what they were); manual when nothing is known
-      const before = action === 'reopen' ? [...ctx.store().events()].reverse().find((e) => e.id === id && e.status && !['applied', 'dismissed'].includes(e.status)) : null;
+      const before = action === 'reopen' ? [...ctx.events()].reverse().find((e) => e.id === id && e.status && !['applied', 'dismissed'].includes(e.status)) : null;
       ctx.appendEvent({ id, status: before ? before.status : status, note: undefined });
       return { ok: true, status: before ? before.status : status };
     },
@@ -337,7 +348,9 @@ export function createApi(ctx) {
       try {
         const file = path.join(ctx.home, 'data', 'applications.jsonl'); let text = ''; try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return { ok: true, removed: 0 }; }
         const lines = text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
-        const ids = new Set(lines.filter((e) => e.redirected).map((e) => e.id));
+        // only test-sent postings the user has NOT decided about (an 我已投递 / 忽略 mark is kept, with its history)
+        const last = new Map(); for (const e of lines) if (e.id && e.status) last.set(e.id, e.status);
+        const ids = new Set(lines.filter((e) => e.redirected && !['applied', 'dismissed'].includes(last.get(e.id))).map((e) => e.id));
         if (!ids.size) return { ok: true, removed: 0 };
         const tmp = `${file}.tmp-${process.pid}`; fs.writeFileSync(tmp, lines.filter((e) => !ids.has(e.id)).map((e) => JSON.stringify(e)).join('\n') + '\n'); fs.renameSync(tmp, file);
         const dir = path.join(ctx.home, 'data', 'sent'); try { for (const f of fs.readdirSync(dir)) if ([...ids].some((id) => f.endsWith(`-${id}.txt`))) fs.rmSync(path.join(dir, f)); } catch (e) { /* none */ }

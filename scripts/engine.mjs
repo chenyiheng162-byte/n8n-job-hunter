@@ -16,6 +16,18 @@ export function loadSource(name, srcDir = path.join(here, '..', 'workflows', 'sr
   return fs.readFileSync(path.join(srcDir, name), 'utf8').replace(/^\/\/@include (\S+)$/gm, (_, inc) => fs.readFileSync(path.join(srcDir, 'lib', inc), 'utf8'));
 }
 
+// A response body is read in chunks and given up on past MAX_BODY (a hostile feed or page must not fill memory).
+export const MAX_BODY = 8 * 1024 * 1024;
+async function readBody(res, ctl) {
+  if (!res.body || typeof res.body.getReader !== 'function') return res.text();
+  const reader = res.body.getReader(); const chunks = []; let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    n += value.length; if (n > MAX_BODY) { ctl.abort(); throw Object.assign(new Error(`response larger than ${MAX_BODY} bytes`), { tooLarge: true }); }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 // Same contract as n8n's `this.helpers.httpRequest` for the options the stages use.
 export function makeHttp(fetchImpl = globalThis.fetch) {
   return async function httpRequest({ method = 'GET', url, headers = {}, body, json = false, timeout = 30000 }) {
@@ -24,7 +36,7 @@ export function makeHttp(fetchImpl = globalThis.fetch) {
       const init = { method, headers: { ...headers }, signal: ctl.signal, redirect: 'follow' };
       if (body !== undefined) { init.body = typeof body === 'string' ? body : JSON.stringify(body); if (!init.headers['Content-Type']) init.headers['Content-Type'] = 'application/json'; }
       const res = await fetchImpl(url, init);
-      const text = await res.text();
+      const text = await readBody(res, ctl);
       if (!res.ok) throw Object.assign(new Error(`${res.status} ${text.slice(0, 200)}`), { httpCode: res.status });
       if (json) return JSON.parse(text);
       try { return JSON.parse(text); } catch (e) { return text; } // n8n parses JSON bodies automatically too
